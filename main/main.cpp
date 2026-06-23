@@ -19,7 +19,7 @@
 #include "clock_protocol.h"
 #include "clock_modes.h"
 
-#include "nvs.h"
+#include "clock_mdns.h"
 
 #define ALARM_GPIO GPIO_NUM_48
 #define DS18B20_GPIO GPIO_NUM_39
@@ -961,7 +961,9 @@ static void check_or_set_default_rtc(ds3231_dev_t *rtc)
 extern "C" void app_main(void)
 {
 	ESP_LOGI(TAG, "Starting Ethernet");
-	ESP_ERROR_CHECK(clock_ethernet_init_static());
+	//ESP_ERROR_CHECK(clock_ethernet_init_static());  //STATIC IP
+	
+	ESP_ERROR_CHECK(clock_ethernet_init_dhcp());  // DHCP
 
 	clock_protocol_context_t protocol_ctx = {
 	    .brightness_level = &brightness_level,

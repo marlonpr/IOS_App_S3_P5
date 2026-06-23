@@ -107,6 +107,35 @@ bool rtc_time_is_valid(const ds3231_time_t *time)
 }
 
 
+
+
+
+
+#include <cstddef>
+#include <cstdint>
+
+static bool is_ascii_hex(uint8_t value)
+{
+    return
+        (value >= '0' && value <= '9') ||
+        (value >= 'A' && value <= 'F') ||
+        (value >= 'a' && value <= 'f');
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 int clock_protocol_rx_callback(const uint8_t *p,
                                int len,
                                uint8_t *tx,
@@ -593,14 +622,87 @@ int clock_protocol_rx_callback(const uint8_t *p,
 		    return 0;
 		}
 		
+		/*
+		 * HB heartbeat command:
+		 *
+		 * Request:
+		 * /TA <ID> HB <Sequence_Hex_High><Sequence_Hex_Low> \
+		 *
+		 * Response:
+		 * /ta <ID> hb <Sequence_Hex_High><Sequence_Hex_Low> \
+		 *
+		 * Example:
+		 * Request:  2F 54 41 00 48 42 30 35 5C
+		 * Response: 2F 74 61 00 68 62 30 35 5C
+		 */
+		if (len == 9 &&
+		    p[0] == '/' &&
+		    p[1] == 'T' &&
+		    p[2] == 'A' &&
+		    p[4] == 'H' &&
+		    p[5] == 'B' &&
+		    p[8] == '\\') {
+
+		    const uint8_t board_id = p[3];
+
+		    if (board_id != 0x00) {
+		        ESP_LOGW(
+		            TAG,
+		            "Ignoring HB command for different board ID: %u",
+		            board_id
+		        );
+
+		        return -1;
+		    }
+
+		    if (!is_ascii_hex(p[6]) ||
+		        !is_ascii_hex(p[7])) {
+
+		        ESP_LOGW(
+		            TAG,
+		            "Invalid HB sequence: 0x%02X 0x%02X",
+		            p[6],
+		            p[7]
+		        );
+
+		        return -1;
+		    }
+
+		    if (tx == NULL || tx_max < 9) {
+		        ESP_LOGE(TAG, "TX buffer too small for HB response");
+		        return -1;
+		    }
+
+		    /*
+		     * Build matching heartbeat ACK.
+		     */
+		    tx[0] = '/';
+		    tx[1] = 't';
+		    tx[2] = 'a';
+		    tx[3] = board_id;
+		    tx[4] = 'h';
+		    tx[5] = 'b';
+		    tx[6] = p[6];
+		    tx[7] = p[7];
+		    tx[8] = '\\';
+
+		    ESP_LOGI(
+		        TAG,
+		        "Heartbeat received: board=%u sequence=%c%c",
+		        board_id,
+		        static_cast<char>(p[6]),
+		        static_cast<char>(p[7])
+		    );
+
+		    /*
+		     * clock_ethernet.cpp sends this number of bytes from tx.
+		     */
+		    return 9;
+		}		
 
 		ESP_LOGW(TAG, "Unknown Ethernet command");
 		return -1;
 }
-
-
-
-
 
 
 

@@ -27,6 +27,8 @@
 
 #include "driver/gpio.h"
 
+#include "clock_mdns.h"
+
 static const char *TAG = "CLOCK_ETHERNET";
 
 // ================= W5500 PINS =================
@@ -81,18 +83,40 @@ static void eth_event_handler(void *arg,
     }
 }
 
-static void got_ip_event_handler(void *arg,
-                                 esp_event_base_t event_base,
-                                 int32_t event_id,
-                                 void *event_data)
+static void got_ip_event_handler(
+    void *arg,
+    esp_event_base_t event_base,
+    int32_t event_id,
+    void *event_data)
 {
-    ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
-    const esp_netif_ip_info_t *ip_info = &event->ip_info;
+    if (event_base != IP_EVENT ||
+        event_id != IP_EVENT_ETH_GOT_IP) {
+        return;
+    }
+
+    auto *event =
+        static_cast<ip_event_got_ip_t *>(event_data);
+
+    const esp_netif_ip_info_t *ip_info =
+        &event->ip_info;
 
     ESP_LOGI(TAG, "Ethernet Got IP Address");
     ESP_LOGI(TAG, "ETHIP: " IPSTR, IP2STR(&ip_info->ip));
     ESP_LOGI(TAG, "ETHMASK: " IPSTR, IP2STR(&ip_info->netmask));
     ESP_LOGI(TAG, "ETHGW: " IPSTR, IP2STR(&ip_info->gw));
+
+    constexpr uint8_t board_id = 0;
+
+    esp_err_t mdns_err =
+        clock_mdns_start(board_id);
+
+    if (mdns_err != ESP_OK) {
+        ESP_LOGE(
+            TAG,
+            "Failed to start mDNS: %s",
+            esp_err_to_name(mdns_err)
+        );
+    }
 }
 
 static void log_tcp_packet(const uint8_t *data, int len)
@@ -396,7 +420,7 @@ static esp_err_t clock_ethernet_init_common(bool use_static_ip)
         //ip_info.ip.addr      = ESP_IP4TOADDR(192, 168, 10, 51);
 		ip_info.ip.addr      = ESP_IP4TOADDR(192, 168, 137, 205);
         //ip_info.netmask.addr = ESP_IP4TOADDR(255, 255, 255, 0);
-		ip_info.netmask.addr = ESP_IP4TOADDR(255, 255, 255, 0); // 240 subfix 8 for iphone hotspot
+		ip_info.netmask.addr = ESP_IP4TOADDR(255, 255, 255, 0); 
         //ip_info.gw.addr      = ESP_IP4TOADDR(192, 168, 10, 1);
 		ip_info.gw.addr      = ESP_IP4TOADDR(192, 168, 137, 1);
 
