@@ -698,7 +698,46 @@ int clock_protocol_rx_callback(const uint8_t *p,
 		     * clock_ethernet.cpp sends this number of bytes from tx.
 		     */
 		    return 9;
-		}		
+		}
+		
+		
+		if (len == 7 &&
+		    p[0] == '/' &&
+		    p[1] == 'T' &&
+		    p[2] == 'A' &&
+		    p[4] == 'N' &&
+		    p[5] == 'M' &&
+		    p[6] == '\\') {
+
+		    const uint8_t board_id = p[3];
+
+		    if (board_id != 0x00) {
+		        ESP_LOGW(
+		            TAG,
+		            "Ignoring NM command for different board ID: %u",
+		            board_id
+		        );
+		        return -1;
+		    }
+
+		    if (tx == nullptr || tx_max < 8) {
+		        ESP_LOGE(TAG, "TX buffer too small for NM response");
+		        return -1;
+		    }
+
+			const uint8_t new_mode = clock_modes_advance_mode();
+
+			tx[0] = '/';
+			tx[1] = 't';
+			tx[2] = 'a';
+			tx[3] = board_id;
+			tx[4] = 'n';
+			tx[5] = 'm';
+			tx[6] = new_mode;
+			tx[7] = '\\';
+
+			return 8;
+		}				
 
 		ESP_LOGW(TAG, "Unknown Ethernet command");
 		return -1;

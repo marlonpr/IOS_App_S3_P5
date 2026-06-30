@@ -649,6 +649,48 @@ void ds18b20_task(void* pvParameters)
     }
 }
 
+uint8_t clock_modes_advance_mode()
+{
+    display_mode_t new_mode;
+
+    portENTER_CRITICAL(&g_data_mux);
+
+    if (display_mode >= MODE_ROTATION) {
+        display_mode = MODE_1;
+    } else {
+        display_mode =
+            static_cast<display_mode_t>(display_mode + 1);
+    }
+
+    new_mode = display_mode;
+
+    clock_modes_reset_sequences();
+
+    portEXIT_CRITICAL(&g_data_mux);
+
+    clock_settings_save_mode(static_cast<uint8_t>(new_mode));
+
+    scroll_stop();
+
+    char msg[16];
+    snprintf(
+        msg,
+        sizeof(msg),
+        "MODO:%u",
+        static_cast<unsigned>(new_mode)
+    );
+
+    show_temp_message(msg, 1000);
+
+    ESP_LOGI(
+        TAG,
+        "Display mode changed to %u",
+        static_cast<unsigned>(new_mode)
+    );
+
+    return static_cast<uint8_t>(new_mode);
+}
+
 static void handle_normal_button(button_t btn, ds3231_dev_t *rtc)
 {
     switch (btn)
@@ -657,36 +699,11 @@ static void handle_normal_button(button_t btn, ds3231_dev_t *rtc)
             clock_menu_enter();
             break;
 
-        case BTN_UP:
-        {
-            display_mode_t new_mode;
-
-            portENTER_CRITICAL(&g_data_mux);
-
-            if (display_mode >= MODE_ROTATION) {
-                display_mode = MODE_1;
-            } else {
-                display_mode = (display_mode_t)(display_mode + 1);
-            }
-
-            new_mode = display_mode;
-
-			clock_modes_reset_sequences();
-
-            portEXIT_CRITICAL(&g_data_mux);
-
-            clock_settings_save_mode((uint8_t)new_mode);
-
-            scroll_stop();
-
-            char msg[16];
-            snprintf(msg, sizeof(msg), "MODO:%d", new_mode);
-            show_temp_message(msg, 1000);
-
-            ESP_LOGI(TAG, "Display mode changed to %d", new_mode);
-
-            break;
-        }
+			case BTN_UP:
+			{
+			    clock_modes_advance_mode();
+			    break;
+			}
 
         case BTN_DOWN:
         {

@@ -39,3 +39,7 @@ int clock_protocol_rx_callback(const uint8_t *p,
                                int len,
                                uint8_t *tx,
                                int tx_max);
+							   
+							   
+							   
+uint8_t clock_modes_advance_mode();
