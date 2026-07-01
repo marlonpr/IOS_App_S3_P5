@@ -18,6 +18,8 @@
 #include "clock_alarm.h"
 #include "clock_protocol.h"
 #include "clock_modes.h"
+#include "clock_sd_card.h"
+#include "clock_logo_manager.h"
 
 #include "clock_mdns.h"
 
@@ -453,9 +455,10 @@ void display_update_task(void* pvParameters)
 
 				case MODE_2:
 				{
-				    fixed_item_t active_fixed_item = clock_modes_get_fixed_item();
+				    //fixed_item_t active_fixed_item = clock_modes_get_fixed_item();
 
-				    if (active_fixed_item == FIXED_ITEM_LOGO) {
+				    //if (active_fixed_item == FIXED_ITEM_LOGO) {
+					if (true) {
 				        scroll_stop();
 				        clock_display_draw_logo(driver);
 				    } else {
@@ -977,6 +980,18 @@ static void check_or_set_default_rtc(ds3231_dev_t *rtc)
 
 extern "C" void app_main(void)
 {
+	clock_logo_init();
+
+	esp_err_t sd_err = clock_sd_card_init();
+	if (sd_err != ESP_OK) {
+	    ESP_LOGW(TAG, "SD card init failed, using compiled logo fallback: %s", esp_err_to_name(sd_err));
+	} else {
+	    esp_err_t logo_err = clock_logo_reload_from_sd();
+	    if (logo_err != ESP_OK) {
+	        ESP_LOGW(TAG, "Logo reload at boot failed, keeping fallback: %s", esp_err_to_name(logo_err));
+	    }
+	}
+
 	ESP_LOGI(TAG, "Starting Ethernet");
 	//ESP_ERROR_CHECK(clock_ethernet_init_static());  //STATIC IP
 	

@@ -10,10 +10,13 @@ static const char *TAG = "CLOCK_MDNS";
 
 static bool s_mdns_initialized = false;
 static bool s_service_added = false;
+static bool s_logo_service_added = false;
 
 static char s_hostname[32];
 static char s_instance_name[48];
 static char s_board_id_text[8];
+static char s_logo_instance_name[48];
+static char s_logo_board_id_text[8];
 
 esp_err_t clock_mdns_start(uint8_t board_id)
 {
@@ -127,5 +130,56 @@ esp_err_t clock_mdns_start(uint8_t board_id)
     ESP_LOGI(TAG, "Port: 5000");
     ESP_LOGI(TAG, "Board ID: %u", board_id);
 
+    return ESP_OK;
+}
+
+esp_err_t clock_mdns_add_logo_upload_service(uint8_t board_id)
+{
+    if (!s_mdns_initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (s_logo_service_added) {
+        return ESP_OK;
+    }
+
+    snprintf(
+        s_logo_instance_name,
+        sizeof(s_logo_instance_name),
+        "ESP32 Clock %u Logo",
+        static_cast<unsigned>(board_id)
+    );
+
+    snprintf(
+        s_logo_board_id_text,
+        sizeof(s_logo_board_id_text),
+        "%u",
+        static_cast<unsigned>(board_id)
+    );
+
+    mdns_txt_item_t txt_items[] = {
+        {"id", s_logo_board_id_text},
+        {"format", "rgb888"},
+        {"width", "64"},
+        {"height", "32"},
+        {"version", "1"}
+    };
+
+    esp_err_t err = mdns_service_add(
+        s_logo_instance_name,
+        "_espclock-logo",
+        "_tcp",
+        5001,
+        txt_items,
+        sizeof(txt_items) / sizeof(txt_items[0])
+    );
+
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "logo mdns_service_add failed: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    s_logo_service_added = true;
+    ESP_LOGI(TAG, "Logo mDNS service advertised on port 5001");
     return ESP_OK;
 }

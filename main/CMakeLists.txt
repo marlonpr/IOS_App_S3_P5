@@ -9,6 +9,9 @@ idf_component_register(
     "clock_protocol.cpp" 
     "clock_modes.cpp"
     "clock_mdns.cpp"
+    "clock_sd_card.cpp"
+    "clock_logo_manager.cpp"
+    "logo_upload_server.cpp"
     INCLUDE_DIRS "."
     REQUIRES led_panel 
     	DS3231 
@@ -22,6 +25,9 @@ idf_component_register(
     	espressif__w5500
     	esp_app_format
         mdns
+        fatfs
+        sdmmc
+        esp_driver_sdspi
 )
 
 target_compile_features(${COMPONENT_LIB} PRIVATE cxx_std_17)

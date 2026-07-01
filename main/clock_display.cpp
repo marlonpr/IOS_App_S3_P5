@@ -3,7 +3,7 @@
 #include <stdio.h>
 
 #include "led_panel.h"
-#include "logo.h"
+#include "clock_logo_manager.h"
 
 // =============================== DATE TEXT ===============================
 
@@ -675,12 +675,19 @@ void clock_display_draw_logo(Hub75Driver *driver)
         return;
     }
 
+    const uint32_t *pixels = clock_logo_lock_pixels();
+    if (pixels == nullptr) {
+        return;
+    }
+
     draw_bitmap_rgb32(*driver,
                       0,
                       0,
-                      logo_bitmap,
-                      LOGO_WIDTH,
-                      LOGO_HEIGHT);
+                      pixels,
+                      CLOCK_LOGO_WIDTH,
+                      CLOCK_LOGO_HEIGHT);
+
+    clock_logo_unlock_pixels();
 }
 
 void clock_display_draw_startup(Hub75Driver *driver,

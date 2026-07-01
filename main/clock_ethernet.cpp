@@ -28,12 +28,13 @@
 #include "driver/gpio.h"
 
 #include "clock_mdns.h"
+#include "logo_upload_server.h"
 
 static const char *TAG = "CLOCK_ETHERNET";
 
 // ================= W5500 PINS =================
 
-#define ETH_SPI_HOST       SPI2_HOST
+#define ETH_SPI_HOST       SPI3_HOST
 
 #define ETH_MOSI_GPIO      GPIO_NUM_11
 #define ETH_MISO_GPIO      GPIO_NUM_12
@@ -116,6 +117,28 @@ static void got_ip_event_handler(
             "Failed to start mDNS: %s",
             esp_err_to_name(mdns_err)
         );
+    }
+
+    ESP_LOGI(TAG, "Network ready; starting logo upload server");
+
+    esp_err_t upload_start_err = logo_upload_server_start();
+
+    if (upload_start_err != ESP_OK) {
+        ESP_LOGE(
+            TAG,
+            "Failed to start logo upload server: %s",
+            esp_err_to_name(upload_start_err)
+        );
+        return;
+    }
+
+    esp_err_t upload_mdns_err =
+        logo_upload_server_register_mdns_service(board_id);
+
+    if (upload_mdns_err != ESP_OK) {
+        ESP_LOGW(TAG,
+                 "Logo upload mDNS service not available: %s",
+                 esp_err_to_name(upload_mdns_err));
     }
 }
 
@@ -328,6 +351,13 @@ static esp_err_t clock_ethernet_init_common(bool use_static_ip)
     s_use_static_ip = use_static_ip;
 
 	ESP_LOGI(TAG, "Initializing W5500 Ethernet");
+    ESP_LOGI(TAG,
+             "W5500 SPI host=%d MOSI=%d MISO=%d SCLK=%d CS=%d",
+             ETH_SPI_HOST,
+             ETH_MOSI_GPIO,
+             ETH_MISO_GPIO,
+             ETH_SCLK_GPIO,
+             ETH_CS_GPIO);
 
 	esp_err_t isr_ret = gpio_install_isr_service(0);
 
