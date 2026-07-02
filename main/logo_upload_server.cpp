@@ -33,8 +33,7 @@ static TaskHandle_t s_server_task_handle = nullptr;
 static bool s_server_starting = false;
 static bool s_server_listening = false;
 static bool s_service_registered = false;
-static StaticSemaphore_t s_upload_mutex_storage;
-static SemaphoreHandle_t s_upload_mutex = nullptr;
+
 static StaticSemaphore_t s_task_boot_gate_storage;
 static SemaphoreHandle_t s_task_boot_gate = nullptr;
 static StaticEventGroup_t s_start_event_group_storage;
@@ -398,33 +397,44 @@ static void logo_upload_server_task(void *param)
         xEventGroupSetBits(s_start_event_group, kServerReadyBit);
     }
 
-    while (true) {
-        struct sockaddr_in client_addr = {};
-        socklen_t client_len = sizeof(client_addr);
-        client_sock = accept(listen_sock, (struct sockaddr *)&client_addr, &client_len);
-        if (client_sock < 0) {
-            ESP_LOGE(TAG, "accept failed: errno=%d", errno);
-            continue;
-        }
+	while (true) {
+	    struct sockaddr_in client_addr = {};
+	    socklen_t client_len = sizeof(client_addr);
 
-        ESP_LOGI(TAG, "Upload client connected from %s:%u",
-                 inet_ntoa(client_addr.sin_addr),
-                 (unsigned)ntohs(client_addr.sin_port));
+	    client_sock = accept(
+	        listen_sock,
+	        reinterpret_cast<struct sockaddr *>(&client_addr),
+	        &client_len
+	    );
 
-        if (s_upload_mutex != nullptr) {
-            xSemaphoreTake(s_upload_mutex, portMAX_DELAY);
-        }
+	    if (client_sock < 0) {
+	        ESP_LOGE(TAG, "accept failed: errno=%d", errno);
+	        continue;
+	    }
 
-        handle_client(client_sock);
+	    ESP_LOGI(
+	        TAG,
+	        "Upload client connected from %s:%u",
+	        inet_ntoa(client_addr.sin_addr),
+	        static_cast<unsigned>(ntohs(client_addr.sin_port))
+	    );
 
-        if (s_upload_mutex != nullptr) {
-            xSemaphoreGive(s_upload_mutex);
-        }
+	    if (!clock_logo_operation_begin(10000)) {
+	        ESP_LOGW(
+	            TAG,
+	            "Logo upload could not acquire operation lock"
+	        );
 
-        shutdown(client_sock, 0);
-        close(client_sock);
-        client_sock = -1;
-    }
+	        send_error_line(client_sock, "ERR TIMEOUT\n");
+	    } else {
+	        handle_client(client_sock);
+	        clock_logo_operation_end();
+	    }
+
+	    shutdown(client_sock, 0);
+	    close(client_sock);
+	    client_sock = -1;
+	}
 
 exit_task:
     if (client_sock >= 0) {
@@ -469,10 +479,6 @@ esp_err_t logo_upload_server_start(void)
     if (!logo_upload_server_mark_starting_if_idle()) {
         ESP_LOGI(TAG, "Logo upload server already running");
         return ESP_OK;
-    }
-
-    if (s_upload_mutex == nullptr) {
-        s_upload_mutex = xSemaphoreCreateMutexStatic(&s_upload_mutex_storage);
     }
 
     if (s_task_boot_gate == nullptr) {

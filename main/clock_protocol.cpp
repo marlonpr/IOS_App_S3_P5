@@ -6,6 +6,9 @@
 #include "clock_alarm.h"
 #include "clock_menu.h"
 
+#include "clock_logo_manager.h"
+#include "clock_modes.h"
+
 static const char *TAG = "CLOCK_PROTOCOL";
 
 static clock_protocol_context_t s_ctx = {};
@@ -574,6 +577,118 @@ int clock_protocol_rx_callback(const uint8_t *p,
 		
 		
 		
+		
+		
+		/*
+		 * DL command:
+		 * /TA <ID> DL \
+		 *
+		 * Permanently removes /sdcard/logo.lgo and activates
+		 * the logo compiled into the ESP32 firmware.
+		 *
+		 * Response:
+		 * /ta <ID> dl <Result> \
+		 *
+		 * Result:
+		 * 0x00 = success
+		 * 0x01 = logo operation busy
+		 * 0x02 = SD-card/file operation failed
+		 */
+		if (len == 7 &&
+		    p[0] == '/' &&
+		    p[1] == 'T' &&
+		    p[2] == 'A' &&
+		    p[4] == 'D' &&
+		    p[5] == 'L' &&
+		    p[6] == '\\') {
+
+		    const uint8_t board_id = p[3];
+
+		    ESP_LOGI(
+		        TAG,
+		        "DL restore default logo command received: board_id=%u",
+		        board_id
+		    );
+
+		    /*
+		     * This firmware currently accepts only Board ID 0.
+		     * Board ID 0x5C is also invalid because it is the delimiter.
+		     */
+		    if (board_id != 0x00 || board_id == 0x5C) {
+		        ESP_LOGW(
+		            TAG,
+		            "Ignoring DL command for different or invalid board ID: %u",
+		            board_id
+		        );
+
+		        return -1;
+		    }
+
+		    if (tx == nullptr || tx_max < 8) {
+		        ESP_LOGE(
+		            TAG,
+		            "TX buffer too small for DL response"
+		        );
+
+		        return -1;
+		    }
+
+		    const clock_logo_restore_result_t restore_result =
+		        clock_logo_restore_compiled_default();
+
+		    uint8_t protocol_result = 0x02;
+
+		    switch (restore_result) {
+		        case CLOCK_LOGO_RESTORE_OK:
+		            protocol_result = 0x00;
+
+		            /*
+		             * Force the display-mode logic to fetch the newly
+		             * activated compiled logo.
+		             */
+		            clock_modes_reset_sequences();
+		            break;
+
+		        case CLOCK_LOGO_RESTORE_BUSY:
+		            protocol_result = 0x01;
+		            break;
+
+		        case CLOCK_LOGO_RESTORE_STORAGE_ERROR:
+		        default:
+		            protocol_result = 0x02;
+		            break;
+		    }
+
+		    tx[0] = '/';
+		    tx[1] = 't';
+		    tx[2] = 'a';
+		    tx[3] = board_id;
+		    tx[4] = 'd';
+		    tx[5] = 'l';
+		    tx[6] = protocol_result;
+		    tx[7] = '\\';
+
+		    ESP_LOGI(
+		        TAG,
+		        "DL response: board_id=%u result=0x%02X",
+		        board_id,
+		        protocol_result
+		    );
+
+		    /*
+		     * clock_ethernet.cpp sends exactly 8 bytes from tx.
+		     */
+		    return 8;
+		}
+		
+		
+		
+		
+		
+		
+		
+		
+		
 		/*
 		 * RT command:
 		 * /TA <ID> RT <Reset_ID> \
@@ -583,44 +698,111 @@ int clock_protocol_rx_callback(const uint8_t *p,
 		 * ACK:
 		 * /ta <ID> rt \
 		 */
-		if (len == 8 &&
-		    p[0] == '/' &&
-		    p[1] == 'T' &&
-		    p[2] == 'A' &&
-		    p[4] == 'R' &&
-		    p[5] == 'T' &&
-		    p[7] == '\\') {
+		 /*
+		  * RT command:
+		  * /TA <ID> RT <Reset_ID> \
+		  *
+		  * reset_id = 0x00 -> reset all device settings/defaults
+		  *
+		  * The firmware also permanently removes the uploaded SD logo
+		  * and activates the compiled default logo.
+		  *
+		  * ACK:
+		  * /ta <ID> rt \
+		  */
+		 if (len == 8 &&
+		     p[0] == '/' &&
+		     p[1] == 'T' &&
+		     p[2] == 'A' &&
+		     p[4] == 'R' &&
+		     p[5] == 'T' &&
+		     p[7] == '\\') {
 
-		    uint8_t board_id = p[3];
-		    uint8_t reset_id = p[6];
+		     const uint8_t board_id = p[3];
+		     const uint8_t reset_id = p[6];
 
-		    ESP_LOGI(TAG,
-		             "RT reset command received: board_id=%u reset_id=0x%02X",
-		             board_id,
-		             reset_id);
+		     ESP_LOGI(
+		         TAG,
+		         "RT reset command received: board_id=%u reset_id=0x%02X",
+		         board_id,
+		         reset_id
+		     );
 
-		    if (board_id != 0x00) {
-		        ESP_LOGW(TAG, "Ignoring RT command for different board ID: %u", board_id);
-		        return -1;
-		    }
+		     if (board_id != 0x00 || board_id == 0x5C) {
+		         ESP_LOGW(
+		             TAG,
+		             "Ignoring RT command for different or invalid board ID: %u",
+		             board_id
+		         );
 
-		    if (reset_id != 0x00) {
-		        ESP_LOGW(TAG, "Unknown RT reset_id=0x%02X", reset_id);
-		        return -1;
-		    }
+		         return -1;
+		     }
 
-			portENTER_CRITICAL(s_ctx.data_mux);
-			*s_ctx.factory_reset_pending = true;
-			portEXIT_CRITICAL(s_ctx.data_mux);
+		     if (reset_id != 0x00) {
+		         ESP_LOGW(
+		             TAG,
+		             "Unknown RT reset_id=0x%02X",
+		             reset_id
+		         );
 
-		    ESP_LOGW(TAG, "RT Reset All received, factory reset pending");
+		         return -1;
+		     }
 
-		    /*
-		     * Generic ACK will be sent:
-		     * /ta <ID> rt \
-		     */
-		    return 0;
-		}
+		     /*
+		      * Restore the compiled logo synchronously before reporting
+		      * successful acceptance of the factory reset.
+		      */
+		     const clock_logo_restore_result_t logo_result =
+		         clock_logo_restore_compiled_default();
+
+		     if (logo_result == CLOCK_LOGO_RESTORE_BUSY) {
+		         ESP_LOGW(
+		             TAG,
+		             "RT factory reset rejected: logo operation busy"
+		         );
+
+		         /*
+		          * Do not send a successful RT ACK.
+		          */
+		         return -1;
+		     }
+
+		     if (logo_result != CLOCK_LOGO_RESTORE_OK) {
+		         ESP_LOGE(
+		             TAG,
+		             "RT factory reset failed restoring compiled logo: result=%d",
+		             static_cast<int>(logo_result)
+		         );
+
+		         /*
+		          * Do not send a successful RT ACK when the persistent
+		          * SD logo could not be removed.
+		          */
+		         return -1;
+		     }
+
+		     clock_modes_reset_sequences();
+
+		     /*
+		      * Let the main task restore brightness, format, mode,
+		      * alarms, and the other existing defaults.
+		      */
+		     portENTER_CRITICAL(s_ctx.data_mux);
+		     *s_ctx.factory_reset_pending = true;
+		     portEXIT_CRITICAL(s_ctx.data_mux);
+
+		     ESP_LOGW(
+		         TAG,
+		         "RT Reset All received: compiled logo restored, "
+		         "factory reset pending"
+		     );
+
+		     /*
+		      * Generic ACK will be sent by clock_ethernet.cpp:
+		      * /ta <ID> rt \
+		      */
+		     return 0;
+		 }
 		
 		/*
 		 * HB heartbeat command:

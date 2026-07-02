@@ -1,5 +1,6 @@
 #include "clock_logo_manager.h"
 
+#include <errno.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -12,8 +13,20 @@
 #include "clock_sd_card.h"
 #include "logo.h"
 
+static constexpr const char *kBackupLogoPath =
+    "/sdcard/logo.bak";
+
+static constexpr const char *kTemporaryLogoPath =
+    "/sdcard/logo.tmp";
+	
+static const char *const kLogoPath = 
+	"/sdcard/logo.lgo";
+
 static const char *TAG = "CLOCK_LOGO";
-static const char *const kLogoPath = "/sdcard/logo.lgo";
+
+
+static SemaphoreHandle_t s_logo_operation_mutex = nullptr;
+static StaticSemaphore_t s_logo_operation_mutex_storage;
 
 static_assert(LOGO_WIDTH == CLOCK_LOGO_WIDTH, "Compiled logo width must stay 64");
 static_assert(LOGO_HEIGHT == CLOCK_LOGO_HEIGHT, "Compiled logo height must stay 32");
@@ -37,18 +50,43 @@ static void ensure_initialized()
     bool initialized_now = false;
 
     portENTER_CRITICAL(&s_init_mux);
+
     if (!s_initialized) {
         s_active_pixels = logo_bitmap;
-        memset(s_logo_buffers[0], 0, sizeof(s_logo_buffers[0]));
-        memset(s_logo_buffers[1], 0, sizeof(s_logo_buffers[1]));
-        s_logo_mutex = xSemaphoreCreateMutexStatic(&s_logo_mutex_storage);
-        s_initialized = true;
-        initialized_now = true;
+
+        memset(
+            s_logo_buffers[0],
+            0,
+            sizeof(s_logo_buffers[0])
+        );
+
+        memset(
+            s_logo_buffers[1],
+            0,
+            sizeof(s_logo_buffers[1])
+        );
+
+        s_logo_mutex =
+            xSemaphoreCreateMutexStatic(&s_logo_mutex_storage);
+
+        s_logo_operation_mutex =
+            xSemaphoreCreateMutexStatic(
+                &s_logo_operation_mutex_storage
+            );
+
+        if (s_logo_mutex != nullptr &&
+            s_logo_operation_mutex != nullptr) {
+            s_initialized = true;
+            initialized_now = true;
+        }
     }
+
     portEXIT_CRITICAL(&s_init_mux);
 
     if (initialized_now) {
         ESP_LOGI(TAG, "Compiled logo fallback active");
+    } else if (!s_initialized) {
+        ESP_LOGE(TAG, "Failed to initialize logo mutexes");
     }
 }
 
@@ -68,6 +106,47 @@ static uint32_t read_le_u32(const uint8_t *data)
 void clock_logo_init()
 {
     ensure_initialized();
+}
+
+bool clock_logo_operation_begin(uint32_t timeout_ms)
+{
+    ensure_initialized();
+
+    if (s_logo_operation_mutex == nullptr) {
+        ESP_LOGE(
+            TAG,
+            "Logo operation mutex is not initialized"
+        );
+
+        return false;
+    }
+
+    TickType_t timeout_ticks;
+
+    if (timeout_ms == UINT32_MAX) {
+        timeout_ticks = portMAX_DELAY;
+    } else {
+        timeout_ticks = pdMS_TO_TICKS(timeout_ms);
+
+        /*
+         * Preserve a small nonzero timeout when requested.
+         */
+        if (timeout_ms > 0 && timeout_ticks == 0) {
+            timeout_ticks = 1;
+        }
+    }
+
+    return xSemaphoreTake(
+               s_logo_operation_mutex,
+               timeout_ticks
+           ) == pdTRUE;
+}
+
+void clock_logo_operation_end()
+{
+    if (s_logo_operation_mutex != nullptr) {
+        xSemaphoreGive(s_logo_operation_mutex);
+    }
 }
 
 static bool parse_header(const uint8_t header[20],
@@ -263,4 +342,122 @@ esp_err_t clock_logo_reload_from_sd()
 
     ESP_LOGI(TAG, "SD logo activated");
     return ESP_OK;
+}
+
+clock_logo_restore_result_t
+clock_logo_restore_compiled_default()
+{
+    ensure_initialized();
+
+    ESP_LOGI(TAG, "Restoring compiled default logo");
+
+    /*
+     * Do not wait if an upload or another logo mutation is active.
+     */
+    if (!clock_logo_operation_begin(0)) {
+        ESP_LOGW(TAG, "Default-logo restore busy");
+        return CLOCK_LOGO_RESTORE_BUSY;
+    }
+
+    clock_logo_restore_result_t result =
+        CLOCK_LOGO_RESTORE_STORAGE_ERROR;
+
+    /*
+     * Successful restoration must guarantee that the uploaded logo
+     * will not return after reboot.
+     */
+    if (!clock_sd_card_is_mounted()) {
+        ESP_LOGE(
+            TAG,
+            "Default-logo restore failed: SD card is not mounted"
+        );
+
+        goto cleanup;
+    }
+
+    /*
+     * Remove the permanent uploaded logo.
+     * ENOENT means the desired persistent state already exists.
+     */
+    errno = 0;
+
+    if (remove(kLogoPath) == 0) {
+        ESP_LOGI(TAG, "SD logo file removed");
+    } else if (errno == ENOENT) {
+        ESP_LOGI(TAG, "SD logo file already absent");
+    } else {
+        ESP_LOGE(
+            TAG,
+            "Default-logo restore failed removing %s: errno=%d",
+            kLogoPath,
+            errno
+        );
+
+        goto cleanup;
+    }
+
+    /*
+     * Remove an abandoned temporary upload.
+     * logo.tmp is never loaded at boot, so failure is nonfatal.
+     */
+    errno = 0;
+
+    if (remove(kTemporaryLogoPath) == 0) {
+        ESP_LOGI(TAG, "Temporary logo file removed");
+    } else if (errno != ENOENT) {
+        ESP_LOGW(
+            TAG,
+            "Could not remove temporary logo file: errno=%d",
+            errno
+        );
+    }
+
+    /*
+     * Remove an abandoned backup file used by the upload rollback logic.
+     * logo.bak is not loaded at boot, so failure is also nonfatal.
+     */
+    errno = 0;
+
+    if (remove(kBackupLogoPath) == 0) {
+        ESP_LOGI(TAG, "Backup logo file removed");
+    } else if (errno != ENOENT) {
+        ESP_LOGW(
+            TAG,
+            "Could not remove backup logo file: errno=%d",
+            errno
+        );
+    }
+
+    /*
+     * Safely switch the display to the compiled logo.
+     */
+    if (s_logo_mutex == nullptr) {
+        ESP_LOGE(TAG, "Active-logo mutex is unavailable");
+        goto cleanup;
+    }
+
+    if (xSemaphoreTake(
+            s_logo_mutex,
+            portMAX_DELAY
+        ) != pdTRUE) {
+        ESP_LOGE(TAG, "Could not lock active logo");
+        goto cleanup;
+    }
+
+    s_active_pixels = logo_bitmap;
+
+    xSemaphoreGive(s_logo_mutex);
+
+    ESP_LOGI(TAG, "Compiled default logo activated");
+
+    result = CLOCK_LOGO_RESTORE_OK;
+
+cleanup:
+    clock_logo_operation_end();
+
+    if (result != CLOCK_LOGO_RESTORE_OK) {
+        ESP_LOGE(TAG, "Default-logo restore failed");
+    }
+
+    return result;
 }
