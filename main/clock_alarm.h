@@ -34,6 +34,14 @@ typedef struct {
     alarm_effect_t effect;
 } clock_alarm_display_state_t;
 
+#ifdef CLOCK_ALARM_ENABLE_TEST_HOOKS
+typedef struct {
+    bool dirty;
+    int64_t dirty_until_us;
+    bool full_replacement_armed;
+} clock_alarm_test_state_t;
+#endif
+
 esp_err_t clock_alarm_init(gpio_num_t alarm_gpio);
 
 esp_err_t clock_alarm_load(void);
@@ -58,3 +66,7 @@ void clock_alarm_check_trigger(const ds3231_time_t *now);
 void clock_alarm_runtime_update(void);
 
 bool clock_alarm_get_display_state(clock_alarm_display_state_t *state);
+
+#ifdef CLOCK_ALARM_ENABLE_TEST_HOOKS
+bool clock_alarm_test_get_state(clock_alarm_test_state_t *state);
+#endif

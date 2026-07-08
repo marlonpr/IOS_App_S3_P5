@@ -39,6 +39,17 @@ static int s_last_trigger_day = 0;
 static int s_last_trigger_hour = -1;
 static int s_last_trigger_minute = -1;
 
+static bool alarm_persisted_fields_equal(const ethernet_alarm_t *left,
+                                         const ethernet_alarm_t *right)
+{
+    return left->configured == right->configured &&
+           left->alarm_id == right->alarm_id &&
+           left->time_hh == right->time_hh &&
+           left->time_mm == right->time_mm &&
+           left->frequency == right->frequency &&
+           left->duration_effect == right->duration_effect;
+}
+
 // =============================== GPIO ===============================
 
 esp_err_t clock_alarm_init(gpio_num_t alarm_gpio)
@@ -173,8 +184,17 @@ esp_err_t clock_alarm_store_from_ca(uint8_t alarm_id,
         return ESP_ERR_INVALID_ARG;
     }
 
+    ethernet_alarm_t incoming_alarm = {};
+    incoming_alarm.configured = true;
+    incoming_alarm.alarm_id = alarm_id;
+    incoming_alarm.time_hh = alarm_hh;
+    incoming_alarm.time_mm = alarm_mm;
+    incoming_alarm.frequency = frequency;
+    incoming_alarm.duration_effect = duration_effect;
+
     bool alarm_enabled = (frequency & 0x80) != 0;
     bool cleared_alarm_table = false;
+    bool alarm_unchanged = false;
 
     portENTER_CRITICAL(&s_alarm_mux);
 
@@ -184,15 +204,16 @@ esp_err_t clock_alarm_store_from_ca(uint8_t alarm_id,
         cleared_alarm_table = true;
     }
 
-    s_alarms[alarm_id - 1].configured = alarm_enabled;
-    s_alarms[alarm_id - 1].alarm_id = alarm_id;
-    s_alarms[alarm_id - 1].time_hh = alarm_hh;
-    s_alarms[alarm_id - 1].time_mm = alarm_mm;
-    s_alarms[alarm_id - 1].frequency = frequency;
-    s_alarms[alarm_id - 1].duration_effect = duration_effect;
+    ethernet_alarm_t *stored_alarm = &s_alarms[alarm_id - 1];
 
-    s_alarms_dirty = true;
-    s_alarms_dirty_until_us = esp_timer_get_time() + 1000000;
+    if (alarm_persisted_fields_equal(stored_alarm, &incoming_alarm)) {
+        alarm_unchanged = true;
+    } else {
+        *stored_alarm = incoming_alarm;
+
+        s_alarms_dirty = true;
+        s_alarms_dirty_until_us = esp_timer_get_time() + 1000000;
+    }
 
     portEXIT_CRITICAL(&s_alarm_mux);
 
@@ -200,8 +221,15 @@ esp_err_t clock_alarm_store_from_ca(uint8_t alarm_id,
         ESP_LOGW(TAG, "First CA after ES: clearing all 60 alarms first");
     }
 
+    if (alarm_unchanged) {
+        ESP_LOGI(TAG,
+                 "CA alarm unchanged: id=%u, NVS save not scheduled",
+                 alarm_id);
+        return ESP_OK;
+    }
+
     ESP_LOGI(TAG,
-             "CA alarm stored: id=%u enabled=%d time=%02u:%02u freq=0x%02X dur_eff=0x%02X",
+             "CA alarm stored: id=%u configured=1 enabled=%d time=%02u:%02u freq=0x%02X dur_eff=0x%02X",
              alarm_id,
              alarm_enabled,
              alarm_hh,
@@ -553,3 +581,22 @@ bool clock_alarm_get_display_state(clock_alarm_display_state_t *state)
 
     return state->active;
 }
+
+#ifdef CLOCK_ALARM_ENABLE_TEST_HOOKS
+bool clock_alarm_test_get_state(clock_alarm_test_state_t *state)
+{
+    if (state == NULL) {
+        return false;
+    }
+
+    portENTER_CRITICAL(&s_alarm_mux);
+
+    state->dirty = s_alarms_dirty;
+    state->dirty_until_us = s_alarms_dirty_until_us;
+    state->full_replacement_armed = s_clear_alarms_on_next_ca;
+
+    portEXIT_CRITICAL(&s_alarm_mux);
+
+    return true;
+}
+#endif

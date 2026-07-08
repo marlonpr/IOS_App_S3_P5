@@ -544,10 +544,13 @@ int clock_protocol_rx_callback(const uint8_t *p,
 			    return -1;
 			}
 
+		    bool alarm_enabled = (alarm_copy.frequency & 0x80) != 0;
+
 		    ESP_LOGI(TAG,
-		             "LA read alarm: id=%u configured=%d time=%02u:%02u freq=0x%02X dur_eff=0x%02X",
+		             "LA read alarm: id=%u configured=%d enabled=%d time=%02u:%02u freq=0x%02X dur_eff=0x%02X",
 		             alarm_id,
 		             alarm_copy.configured,
+		             alarm_enabled,
 		             alarm_copy.time_hh,
 		             alarm_copy.time_mm,
 		             alarm_copy.frequency,
@@ -924,7 +927,6 @@ int clock_protocol_rx_callback(const uint8_t *p,
 		ESP_LOGW(TAG, "Unknown Ethernet command");
 		return -1;
 }
-
 
 
 
