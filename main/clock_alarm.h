@@ -57,6 +57,8 @@ esp_err_t clock_alarm_store_from_ca(uint8_t alarm_id,
                                     uint8_t frequency,
                                     uint8_t duration_effect);
 
+esp_err_t clock_alarm_delete_from_da(uint8_t alarm_id);
+
 bool clock_alarm_read(uint8_t alarm_id, ethernet_alarm_t *out_alarm);
 
 void clock_alarm_clear_all_ram(void);

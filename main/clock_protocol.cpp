@@ -507,6 +507,60 @@ int clock_protocol_rx_callback(const uint8_t *p,
 
 		    return 8;
 		}
+
+		/*
+		 * DA command:
+		 * /TA <ID> DA <Alarma_ID> \
+		 *
+		 * ACK:
+		 * /ta <ID> da <Alarma_ID> \
+		 */
+		if (len == 8 &&
+		    p[0] == '/' &&
+		    p[1] == 'T' &&
+		    p[2] == 'A' &&
+		    p[4] == 'D' &&
+		    p[5] == 'A' &&
+		    p[7] == '\\') {
+
+		    uint8_t board_id = p[3];
+
+		    if (board_id != 0x00) {
+		        ESP_LOGW(TAG, "Ignoring DA command for different board ID: %u", board_id);
+		        return -1;
+		    }
+
+		    uint8_t alarm_id = p[6];
+
+		    if (alarm_id < 1 || alarm_id > MAX_ETH_ALARMS) {
+		        ESP_LOGW(TAG, "Invalid DA alarm_id=%u", alarm_id);
+		        return -1;
+		    }
+
+		    if (tx == NULL || tx_max < 8) {
+		        ESP_LOGE(TAG, "TX buffer too small for DA ACK");
+		        return -1;
+		    }
+
+		    ESP_LOGI(TAG, "DA delete alarm: id=%u", alarm_id);
+
+		    esp_err_t alarm_ret = clock_alarm_delete_from_da(alarm_id);
+
+		    if (alarm_ret != ESP_OK) {
+		        return -1;
+		    }
+
+		    tx[0] = '/';
+		    tx[1] = 't';
+		    tx[2] = 'a';
+		    tx[3] = board_id;
+		    tx[4] = 'd';
+		    tx[5] = 'a';
+		    tx[6] = alarm_id;
+		    tx[7] = '\\';
+
+		    return 8;
+		}
 		
 		/*
 		 * LA command:
@@ -927,6 +981,5 @@ int clock_protocol_rx_callback(const uint8_t *p,
 		ESP_LOGW(TAG, "Unknown Ethernet command");
 		return -1;
 }
-
 
 

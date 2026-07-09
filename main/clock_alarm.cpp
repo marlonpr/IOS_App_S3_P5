@@ -50,6 +50,12 @@ static bool alarm_persisted_fields_equal(const ethernet_alarm_t *left,
            left->duration_effect == right->duration_effect;
 }
 
+static bool alarm_persisted_fields_empty(const ethernet_alarm_t *alarm)
+{
+    const ethernet_alarm_t empty_alarm = {};
+    return alarm_persisted_fields_equal(alarm, &empty_alarm);
+}
+
 // =============================== GPIO ===============================
 
 esp_err_t clock_alarm_init(gpio_num_t alarm_gpio)
@@ -236,6 +242,43 @@ esp_err_t clock_alarm_store_from_ca(uint8_t alarm_id,
              alarm_mm,
              frequency,
              duration_effect);
+
+    return ESP_OK;
+}
+
+esp_err_t clock_alarm_delete_from_da(uint8_t alarm_id)
+{
+    if (alarm_id < 1 || alarm_id > MAX_ETH_ALARMS) {
+        ESP_LOGW(TAG, "Invalid DA alarm_id=%u", alarm_id);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    bool alarm_already_empty = false;
+
+    portENTER_CRITICAL(&s_alarm_mux);
+
+    ethernet_alarm_t *stored_alarm = &s_alarms[alarm_id - 1];
+
+    if (alarm_persisted_fields_empty(stored_alarm)) {
+        alarm_already_empty = true;
+    } else {
+        *stored_alarm = {};
+
+        s_alarms_dirty = true;
+        s_alarms_dirty_until_us = esp_timer_get_time() + 1000000;
+    }
+
+    portEXIT_CRITICAL(&s_alarm_mux);
+
+    if (alarm_already_empty) {
+        ESP_LOGI(TAG,
+                 "DA alarm already empty: id=%u, NVS save not scheduled",
+                 alarm_id);
+    } else {
+        ESP_LOGI(TAG,
+                 "DA alarm deleted: id=%u, NVS save scheduled",
+                 alarm_id);
+    }
 
     return ESP_OK;
 }

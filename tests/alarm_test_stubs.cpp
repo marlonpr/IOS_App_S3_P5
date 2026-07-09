@@ -30,6 +30,11 @@ void alarm_test_reset_save_count(void)
     g_alarm_test_last_save_size = 0;
 }
 
+const unsigned char *alarm_test_last_save_blob(void)
+{
+    return s_alarm_test_last_save_blob;
+}
+
 const char *esp_err_to_name(esp_err_t code)
 {
     switch (code) {
