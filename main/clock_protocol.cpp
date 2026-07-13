@@ -151,6 +151,11 @@ typedef enum {
     SET_MODE_STATUS_INTERNAL_FAILURE = 0x0A,
 } set_mode_protocol_status_t;
 
+typedef enum {
+    READ_MODE_STATUS_SUCCESS = 0x00,
+    READ_MODE_STATUS_INTERNAL_FAILURE = 0x0A,
+} read_mode_protocol_status_t;
+
 static int ascii_hex_nibble(uint8_t value)
 {
     if (value >= '0' && value <= '9') {
@@ -291,6 +296,75 @@ static int handle_set_mode_command(const uint8_t *p,
                                    board_id,
                                    mode,
                                    status);
+}
+
+static bool is_read_mode_command(const uint8_t *p, int len)
+{
+    return p != nullptr && len == 7 &&
+           p[0] == '/' && p[1] == 'T' && p[2] == 'A' &&
+           p[4] == 'R' && p[5] == 'M' && p[6] == '\\';
+}
+
+static int build_read_mode_response(uint8_t *tx,
+                                    int tx_max,
+                                    uint8_t board_id,
+                                    uint8_t mode,
+                                    read_mode_protocol_status_t status)
+{
+    static constexpr size_t kResponseLength = 11;
+
+    if (tx == nullptr || tx_max < 0 ||
+        (size_t)tx_max < kResponseLength) {
+        ESP_LOGE(TAG, "TX buffer too small for RM response");
+        return -1;
+    }
+
+    tx[0] = '/';
+    tx[1] = 't';
+    tx[2] = 'a';
+    tx[3] = board_id;
+    tx[4] = 'r';
+    tx[5] = 'm';
+    encode_ascii_hex_u8(mode, &tx[6]);
+    encode_ascii_hex_u8((uint8_t)status, &tx[8]);
+    tx[10] = '\\';
+    return (int)kResponseLength;
+}
+
+static int handle_read_mode_command(const uint8_t *p,
+                                    uint8_t *tx,
+                                    int tx_max)
+{
+    const uint8_t board_id = p[3];
+
+    if (board_id != 0x00 || board_id == 0x5C) {
+        ESP_LOGW(TAG,
+                 "Ignoring RM command for invalid board ID: %u",
+                 board_id);
+        return -1;
+    }
+
+    ESP_LOGI(TAG, "RM read mode request");
+
+    uint8_t mode = clock_modes_get_mode();
+    read_mode_protocol_status_t status = READ_MODE_STATUS_SUCCESS;
+
+    if (mode < MODE_1 || mode > MODE_ROTATION) {
+        mode = 0;
+        status = READ_MODE_STATUS_INTERNAL_FAILURE;
+    }
+
+    if (status == READ_MODE_STATUS_SUCCESS) {
+        ESP_LOGI(TAG, "RM read mode response: mode=%u", mode);
+    } else {
+        ESP_LOGW(TAG, "RM read mode response: mode=0 status=0A");
+    }
+
+    return build_read_mode_response(tx,
+                                    tx_max,
+                                    board_id,
+                                    mode,
+                                    status);
 }
 
 static bool palette_tx_has_capacity(uint8_t *tx,
@@ -781,6 +855,10 @@ int clock_protocol_rx_callback(const uint8_t *p,
 
 	    if (is_set_mode_command(p, len)) {
 	        return handle_set_mode_command(p, len, tx, tx_max);
+	    }
+
+	    if (is_read_mode_command(p, len)) {
+	        return handle_read_mode_command(p, tx, tx_max);
 	    }
 
 	    /*

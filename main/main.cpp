@@ -742,6 +742,17 @@ esp_err_t clock_modes_set_mode(uint8_t mode)
     return save_result;
 }
 
+uint8_t clock_modes_get_mode()
+{
+    display_mode_t current_mode;
+
+    portENTER_CRITICAL(&g_data_mux);
+    current_mode = display_mode;
+    portEXIT_CRITICAL(&g_data_mux);
+
+    return static_cast<uint8_t>(current_mode);
+}
+
 static void handle_normal_button(button_t btn, ds3231_dev_t *rtc)
 {
     switch (btn)

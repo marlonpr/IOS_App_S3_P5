@@ -51,6 +51,11 @@ void protocol_test_set_mode_result(esp_err_t result)
     s_mode_set_result = result;
 }
 
+void protocol_test_force_display_mode(uint8_t mode)
+{
+    s_display_mode = mode;
+}
+
 void clock_alarm_arm_full_replacement(void)
 {
 }
@@ -148,4 +153,9 @@ esp_err_t clock_modes_set_mode(uint8_t mode)
     s_mode_save_count++;
     clock_modes_reset_sequences();
     return s_mode_set_result;
+}
+
+uint8_t clock_modes_get_mode(void)
+{
+    return s_display_mode;
 }

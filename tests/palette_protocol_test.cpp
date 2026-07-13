@@ -23,6 +23,7 @@ int protocol_test_mode_save_count(void);
 int protocol_test_mode_reset_count(void);
 int protocol_test_mode_advance_count(void);
 void protocol_test_set_mode_result(esp_err_t result);
+void protocol_test_force_display_mode(uint8_t mode);
 
 static int s_test_count = 0;
 static int s_brightness_level = 5;
@@ -113,6 +114,13 @@ static std::vector<uint8_t> make_sm(uint8_t mode)
 {
     std::vector<uint8_t> request = make_request_prefix('S', 'M');
     append_hex(&request, mode);
+    request.push_back('\\');
+    return request;
+}
+
+static std::vector<uint8_t> make_rm(void)
+{
+    std::vector<uint8_t> request = make_request_prefix('R', 'M');
     request.push_back('\\');
     return request;
 }
@@ -551,6 +559,57 @@ static void test_nm_behavior_and_response_are_unchanged(void)
     REQUIRE_EQ(protocol_test_mode_advance_count(), 1);
 }
 
+static void require_rm_response(const std::vector<uint8_t> &response,
+                                uint8_t mode,
+                                uint8_t status)
+{
+    REQUIRE_EQ(response.size(), 11u);
+    REQUIRE_EQ(response[0], '/');
+    REQUIRE_EQ(response[1], 't');
+    REQUIRE_EQ(response[2], 'a');
+    REQUIRE_EQ(response[3], 0x00);
+    REQUIRE_EQ(response[4], 'r');
+    REQUIRE_EQ(response[5], 'm');
+    REQUIRE_EQ(decode_hex(&response[6]), mode);
+    REQUIRE_EQ(decode_hex(&response[8]), status);
+    REQUIRE_EQ(response[10], '\\');
+}
+
+static void test_rm_reports_modes_without_side_effects(void)
+{
+    reset_state();
+
+    for (uint8_t mode = 1; mode <= 4; ++mode) {
+        require_sm_response(dispatch(make_sm(mode)), mode, 0x00);
+        const int save_count = protocol_test_mode_save_count();
+        const int reset_count = protocol_test_mode_reset_count();
+        const int advance_count = protocol_test_mode_advance_count();
+
+        require_rm_response(dispatch(make_rm()), mode, 0x00);
+        REQUIRE_EQ(protocol_test_display_mode(), mode);
+        REQUIRE_EQ(protocol_test_mode_save_count(), save_count);
+        REQUIRE_EQ(protocol_test_mode_reset_count(), reset_count);
+        REQUIRE_EQ(protocol_test_mode_advance_count(), advance_count);
+    }
+}
+
+static void test_rm_internal_failure_and_board_validation(void)
+{
+    reset_state();
+    protocol_test_force_display_mode(5);
+    require_rm_response(dispatch(make_rm()), 0, 0x0A);
+    REQUIRE_EQ(protocol_test_display_mode(), 5);
+    REQUIRE_EQ(protocol_test_mode_save_count(), 0);
+    REQUIRE_EQ(protocol_test_mode_reset_count(), 0);
+
+    std::vector<uint8_t> wrong_board = make_rm();
+    wrong_board[3] = 1;
+    int result = 0;
+    REQUIRE(dispatch(wrong_board, &result).empty());
+    REQUIRE_EQ(result, -1);
+    REQUIRE_EQ(protocol_test_display_mode(), 5);
+}
+
 typedef struct {
     std::vector<std::vector<uint8_t>> frames;
     std::vector<std::vector<uint8_t>> responses;
@@ -672,6 +731,50 @@ static void test_sm_stream_fragmented_and_coalesced(void)
     REQUIRE_EQ(protocol_test_display_mode(), 4);
 }
 
+static void test_rm_stream_fragmented_and_coalesced(void)
+{
+    reset_state();
+    require_sm_response(dispatch(make_sm(2)), 2, 0x00);
+    const int save_count = protocol_test_mode_save_count();
+    const int reset_count = protocol_test_mode_reset_count();
+
+    clock_protocol_stream_t stream = {};
+    clock_protocol_stream_init(&stream);
+    stream_capture_t capture;
+    const uint8_t first[] = {'/', 'T', 'A'};
+    clock_protocol_stream_result_t result =
+        clock_protocol_stream_consume(&stream,
+                                      first,
+                                      sizeof(first),
+                                      capture_frame,
+                                      &capture);
+    REQUIRE_EQ(result.frames_dispatched, 0u);
+
+    const uint8_t second[] = {0, 'R', 'M', '\\'};
+    result = clock_protocol_stream_consume(&stream,
+                                           second,
+                                           sizeof(second),
+                                           capture_frame,
+                                           &capture);
+    REQUIRE_EQ(result.frames_dispatched, 1u);
+    require_rm_response(capture.responses[0], 2, 0x00);
+
+    std::vector<uint8_t> combined = make_rm();
+    std::vector<uint8_t> lp_1 = make_lp(1);
+    combined.insert(combined.end(), lp_1.begin(), lp_1.end());
+    result = clock_protocol_stream_consume(&stream,
+                                           combined.data(),
+                                           combined.size(),
+                                           capture_frame,
+                                           &capture);
+    REQUIRE_EQ(result.frames_dispatched, 2u);
+    require_rm_response(capture.responses[1], 2, 0x00);
+    REQUIRE_EQ(response_status(capture.responses[2]), 0x00);
+    REQUIRE_EQ(protocol_test_display_mode(), 2);
+    REQUIRE_EQ(protocol_test_mode_save_count(), save_count);
+    REQUIRE_EQ(protocol_test_mode_reset_count(), reset_count);
+}
+
 static void test_stream_overflow_and_recovery(void)
 {
     reset_state();
@@ -782,10 +885,15 @@ int main(void)
     run_test(test_sm_validation_has_no_side_effects, "SM validation");
     run_test(test_sm_apply_failures_are_reported, "SM apply failures");
     run_test(test_nm_behavior_and_response_are_unchanged, "NM unchanged");
+    run_test(test_rm_reports_modes_without_side_effects, "RM modes 1 through 4");
+    run_test(test_rm_internal_failure_and_board_validation,
+             "RM internal failure and board validation");
     run_test(test_stream_fragmentation_and_partial_wait, "stream fragmentation");
     run_test(test_stream_coalesced_and_multiple_frames, "stream coalescing");
     run_test(test_sm_stream_fragmented_and_coalesced,
              "SM stream fragmentation and coalescing");
+    run_test(test_rm_stream_fragmented_and_coalesced,
+             "RM stream fragmentation and coalescing");
     run_test(test_stream_overflow_and_recovery, "stream overflow recovery");
     run_test(test_stream_keep_alive, "stream keep-alive");
     run_test(test_stream_preserves_legacy_raw_delimiter_payload,

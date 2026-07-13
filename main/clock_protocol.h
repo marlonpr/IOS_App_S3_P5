@@ -45,3 +45,4 @@ int clock_protocol_rx_callback(const uint8_t *p,
 							   
 uint8_t clock_modes_advance_mode();
 esp_err_t clock_modes_set_mode(uint8_t mode);
+uint8_t clock_modes_get_mode();

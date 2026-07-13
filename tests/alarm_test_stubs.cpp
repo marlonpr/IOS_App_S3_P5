@@ -173,6 +173,11 @@ esp_err_t clock_modes_set_mode(uint8_t mode)
     return ESP_OK;
 }
 
+uint8_t clock_modes_get_mode(void)
+{
+    return 1;
+}
+
 extern "C" bool clock_palette_is_supported_mode(uint8_t mode)
 {
     return mode >= CLOCK_PALETTE_MODE_1 && mode <= CLOCK_PALETTE_MODE_3;
