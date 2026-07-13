@@ -28,7 +28,7 @@ Hub75Config make_config()
 	config.layout_rows  = 1;
 	config.layout_cols  = 1;
 
-	config.layout = Hub75PanelLayout::TOP_LEFT_DOWN_ZIGZAG;	
+	config.layout = Hub75PanelLayout::HORIZONTAL;	
 /*
 	//============================ HUB75 DevKitC-1 ================================
 	// Upper RGB

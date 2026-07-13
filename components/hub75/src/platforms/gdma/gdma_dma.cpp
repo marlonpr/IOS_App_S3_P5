@@ -1,7 +1,7 @@
-// SPDX-FileCopyrightText: 2025 Stuart Parmenter
 // SPDX-License-Identifier: MIT
 //
 // @file gdma_dma.cpp
+// SPDX-FileCopyrightText: 2025 Stuart Parmenter
 // @brief ESP32-S3 LCD_CAM + GDMA implementation for HUB75
 //
 // Uses direct LCD_CAM register access and manual GDMA setup.
@@ -72,7 +72,8 @@ constexpr uint16_t RGB_LOWER_MASK = (1 << R2_BIT) | (1 << G2_BIT) | (1 << B2_BIT
 constexpr uint16_t RGB_MASK = RGB_UPPER_MASK | RGB_LOWER_MASK;  // 0x003F
 
 // Bit clear masks
-constexpr uint16_t OE_CLEAR_MASK = ~(1 << OE_BIT);
+constexpr uint16_t OE_CLEAR_MASK =
+    static_cast<uint16_t>(0xFFFFu & ~(1u << OE_BIT));
 
 GdmaDma::GdmaDma(const Hub75Config &config)
     : PlatformDma(config),
@@ -244,6 +245,27 @@ bool GdmaDma::init() {
   if (!allocate_row_buffers()) {
     return false;
   }
+  
+  
+  
+  
+  
+  pad_words_ = (uint16_t *)heap_caps_calloc(
+      num_rows_ * QUIET_PAD_WORDS,
+      sizeof(uint16_t),
+      MALLOC_CAP_DMA);
+
+  if (!pad_words_) {
+    ESP_LOGE(TAG,
+             "Failed to allocate quiet pad buffers: rows=%d pad_words=%d",
+             num_rows_,
+             QUIET_PAD_WORDS);
+    return false;
+  }
+
+  initialize_pad_buffers();
+  
+  
 
   // Initialize buffers with blank pixels (control bits only, RGB=0)
   initialize_blank_buffers();
@@ -516,10 +538,102 @@ void GdmaDma::shutdown() {
   }
 
   descriptor_count_ = 0;
+  
+  if (pad_words_) {
+    heap_caps_free(pad_words_);
+    pad_words_ = nullptr;
+  }
+  
+  
+  
 
   periph_module_disable(PERIPH_LCD_CAM_MODULE);
 
   ESP_LOGI(TAG, "Shutdown complete");
+}
+
+
+
+
+uint16_t *GdmaDma::pad_row_ptr(int row) {
+  return &pad_words_[row * QUIET_PAD_WORDS];
+}
+
+
+void GdmaDma::initialize_pad_buffers() {
+  if (!pad_words_) {
+    return;
+  }
+
+  for (int row = 0; row < num_rows_; row++) {
+    const uint16_t row_addr = row & ADDR_MASK;
+    uint16_t *pad = pad_row_ptr(row);
+
+    for (int x = 0; x < QUIET_PAD_WORDS; x++) {
+      pad[x] = static_cast<uint16_t>(
+          (row_addr << ADDR_SHIFT) | (1u << OE_BIT));
+    }
+  }
+}
+
+
+void GdmaDma::update_quiet_pad_oe(uint8_t brightness) {
+  if (!pad_words_) {
+    return;
+  }
+
+  const int usable = QUIET_PAD_WORDS - PAD_GUARD_HEAD - PAD_GUARD_TAIL;
+
+  if (usable <= 0) {
+    ESP_LOGE(TAG,
+             "Invalid quiet pad: pad_words=%d head=%d tail=%d",
+             QUIET_PAD_WORDS,
+             PAD_GUARD_HEAD,
+             PAD_GUARD_TAIL);
+    return;
+  }
+
+  // Use the same brightness remap as the original driver.
+  const int effective_brightness = remap_brightness(brightness);
+
+  int display = 0;
+
+  if (brightness > 0 && effective_brightness > 0) {
+    display = (usable * effective_brightness) >> 8;
+
+    if (display == 0) {
+      display = 1;
+    }
+  }
+
+  if (display > usable) {
+    display = usable;
+  }
+
+  const int x_min = PAD_GUARD_HEAD + ((usable - display) / 2);
+  const int x_max = x_min + display;
+
+  for (int row = 0; row < num_rows_; row++) {
+    uint16_t *pad = pad_row_ptr(row);
+
+    for (int x = 0; x < QUIET_PAD_WORDS; x++) {
+      if (x >= x_min && x < x_max) {
+        pad[x] &= OE_CLEAR_MASK;  // OE low = visible
+      } else {
+        pad[x] |= static_cast<uint16_t>(1u << OE_BIT);  // OE high = blank
+      }
+    }
+  }
+
+  ESP_LOGI(TAG,
+           "Quiet-pad OE: brightness=%u effective=%d display=%d/%d window=%d..%d pad_words=%d",
+           (unsigned)brightness,
+           effective_brightness,
+           display,
+           usable,
+           x_min,
+           x_max,
+           QUIET_PAD_WORDS);
 }
 
 // ============================================================================
@@ -820,40 +934,31 @@ void GdmaDma::flip_buffer() {
 // ============================================================================
 
 bool GdmaDma::validate_brightness_config() {
-  const uint8_t latch_blanking = config_.latch_blanking;
-
-  // Edge Case 1: Latch blanking must be less than DMA buffer width
-  // Prevents underflow in: max_pixels = (dma_width_ - latch_blanking) >> rightshift
-  if (latch_blanking >= dma_width_) {
-    ESP_LOGE(TAG, "Invalid config: latch_blanking (%u) >= dma_width (%u)", latch_blanking, dma_width_);
-    return false;
-  }
-
-  // Edge Case 2: DMA buffer width must be large enough for reasonable operation
-  // Need space for: data pixels + latch blanking + safety margins
-  if (dma_width_ < 8) {
-    ESP_LOGE(TAG, "Invalid config: dma_width (%u) too small (minimum 8)", dma_width_);
-    return false;
-  }
-
-  // Edge Case 3: Verify sufficient headroom for safety margin
-  // We need max_pixels >= 2 (at least 1 for display + 1 for safety margin to prevent ghosting)
-  // Since we use uniform max_pixels for all bit planes (BCM comes from descriptor repetition),
-  // we only need to check once.
-  const int max_pixels = dma_width_ - latch_blanking;
-  if (max_pixels < 2) {
+  if (QUIET_PAD_WORDS <= (PAD_GUARD_HEAD + PAD_GUARD_TAIL)) {
     ESP_LOGE(TAG,
-             "Invalid config: max_pixels=%d (need >=2). "
-             "Increase dma_width or decrease latch_blanking.",
-             max_pixels);
-    ESP_LOGE(TAG, "  Config: dma_width=%u, latch_blanking=%u", dma_width_, latch_blanking);
+             "Invalid quiet pad: QUIET_PAD_WORDS=%d guard_head=%d guard_tail=%d",
+             QUIET_PAD_WORDS,
+             PAD_GUARD_HEAD,
+             PAD_GUARD_TAIL);
+    return false;
+  }
+
+  const size_t pad_bytes = QUIET_PAD_WORDS * sizeof(uint16_t);
+
+  if (pad_bytes > 4092) {
+    ESP_LOGE(TAG,
+             "Invalid quiet pad: %zu bytes exceeds safe GDMA descriptor size",
+             pad_bytes);
     return false;
   }
 
   ESP_LOGI(TAG,
-           "Brightness configuration validated: dma_width=%u, latch_blanking=%u, all bit planes have sufficient "
-           "headroom",
-           dma_width_, latch_blanking);
+           "Quiet-pad config validated: pad_words=%d pad_bytes=%zu guards=%d/%d",
+           QUIET_PAD_WORDS,
+           pad_bytes,
+           PAD_GUARD_HEAD,
+           PAD_GUARD_TAIL);
+
   return true;
 }
 
@@ -863,50 +968,23 @@ void GdmaDma::initialize_buffer_internal(RowBitPlaneBuffer *buffers) {
   }
 
   for (int row = 0; row < num_rows_; row++) {
-    uint16_t row_addr = row & ADDR_MASK;
+    const uint16_t row_addr = row & ADDR_MASK;
 
     for (int bit = 0; bit < bit_depth_; bit++) {
-      uint16_t *buf = (uint16_t *) (buffers[row].data + (bit * dma_width_ * 2));
+      uint16_t *buf =
+          (uint16_t *)(buffers[row].data +
+                       (bit * dma_width_ * sizeof(uint16_t)));
 
-      // Row address handling: LSB bit plane uses previous row for LAT settling
-      //
-      // HUB75 panels need time to process the LAT (latch) signal before the row
-      // address changes. LAT transfers data from shift registers to the display
-      // buffer. If the address changes too quickly, the panel may latch the
-      // previous row's data into the current row's buffer.
-      //
-      // To provide settling time, bit plane 0 (LSB) is marked with the previous
-      // row's address, creating a transition period:
-      //
-      //   Row N completes → Row N+1 bit 0 transmits (address still = N)
-      //                  → Panel finishes latching Row N
-      //                  → Row N+1 bit 1-7 transmit (address = N+1)
-      //
-      // This ensures the panel completes Row N's latch operation before it sees
-      // the new address in bit planes 1-7.
-      //
-      // CRITICAL: Row 0 bit 0 WRAPS AROUND to use last row's address (row 31).
-      // This prevents corruption when transitioning from row 31 (last) to row 0 (first).
-      // Without wrap-around, the address would change from 31→0 during row 31's LAT settling,
-      // causing ghosting on row 0.
-      uint16_t addr_for_buffer;
-      if (bit == 0) {
-        // LSB bit plane uses previous row (wraps row 0 to last row)
-        addr_for_buffer = ((row == 0 ? num_rows_ : row) - 1) & ADDR_MASK;
-        ESP_LOGD(TAG, "Row %d Bit 0: Using previous row address 0x%02X (current: 0x%02X)", row, addr_for_buffer,
-                 row_addr);
-      } else {
-        // All other bit planes use current row
-        addr_for_buffer = row_addr;
-      }
-
-      // Fill all pixels with control bits (RGB=0, row address, OE=HIGH)
       for (uint16_t x = 0; x < dma_width_; x++) {
-        buf[x] = (addr_for_buffer << ADDR_SHIFT) | (1 << OE_BIT);
+        buf[x] = static_cast<uint16_t>(
+            (row_addr << ADDR_SHIFT) | (1u << OE_BIT));
       }
 
-      // Set LAT bit on last pixel
-      buf[dma_width_ - 1] |= (1 << LAT_BIT);
+      buf[dma_width_ - 1] |= static_cast<uint16_t>(1u << LAT_BIT);
+
+      if (dma_width_ >= 2) {
+        buf[dma_width_ - 2] |= static_cast<uint16_t>(1u << LAT_BIT);
+      }
     }
   }
 }
@@ -926,144 +1004,7 @@ void GdmaDma::initialize_blank_buffers() {
   ESP_LOGI(TAG, "Blank buffers initialized");
 }
 
-// ============================================================================
-// BCM Control via OE Bit Manipulation
-// ============================================================================
 
-// Configure OE (Output Enable) bits in DMA buffers to control brightness.
-//
-// Architecture: BCM timing vs OE duty cycle
-// ------------------------------------------
-// Binary Code Modulation (BCM) creates color depth by displaying each bit plane
-// for a time proportional to its binary weight. This driver achieves BCM timing
-// through DMA descriptor repetition:
-//   - Bit 7 (MSB): 32 descriptors → displayed 32× longer
-//   - Bit 6: 16 descriptors → displayed 16× longer
-//   - ...
-//   - Bit 0 (LSB): 1 descriptor → displayed 1×
-//
-// The OE signal controls whether LEDs are actually lit during each bit plane's
-// transmission. By keeping OE HIGH (disabled) for part of each transmission,
-// we reduce perceived brightness WITHOUT changing BCM ratios.
-//
-// Key insight: Since BCM ratios come from descriptor repetition, OE duty cycle
-// is applied UNIFORMLY to all bit planes. Each bit plane has the same percentage
-// of pixels with OE=LOW (enabled). This dims the display while preserving color
-// accuracy.
-//
-// Center-based OE placement
-// -------------------------
-// The enabled region (OE=LOW) is centered in the buffer rather than left-aligned.
-// This provides symmetric blanking margins on both sides, which:
-//   1. Keeps the display period away from buffer edges where timing is less stable
-//   2. Provides natural separation from the LAT pulse at the end
-//   3. Distributes any timing jitter symmetrically
-//
-void GdmaDma::set_brightness_oe_internal(RowBitPlaneBuffer *buffers, uint8_t brightness) {
-  if (!buffers) {
-    return;
-  }
-
-  const uint8_t latch_blanking = config_.latch_blanking;
-
-  // brightness=0 blanks the display entirely
-  if (brightness == 0) {
-    for (int row = 0; row < num_rows_; row++) {
-      for (int bit = 0; bit < bit_depth_; bit++) {
-        uint16_t *buf = (uint16_t *) (buffers[row].data + (bit * dma_width_ * 2));
-        for (int x = 0; x < dma_width_; x++) {
-          buf[x] |= (1 << OE_BIT);
-        }
-      }
-    }
-    return;
-  }
-
-  // Remap user brightness through quadratic curve
-  //
-  // The curve passes through (1, min), (128, 128), (255, 255) ensuring:
-  // - Minimum floor for BCM color accuracy at low brightness
-  // - Brightness 128 remains the perceptual midpoint (unchanged from pre-floor behavior)
-  // - Maximum brightness unchanged
-  //
-  // See init_brightness_coeffs() for coefficient calculation.
-  const int effective_brightness = remap_brightness(brightness);
-
-  for (int row = 0; row < num_rows_; row++) {
-    for (int bit = 0; bit < bit_depth_; bit++) {
-      uint16_t *buf = (uint16_t *) (buffers[row].data + (bit * dma_width_ * 2));
-
-      // Uniform OE duty cycle: same display_pixels count for all bit planes.
-      // BCM ratios come from descriptor repetition, not OE timing.
-      const int max_pixels = dma_width_ - latch_blanking;
-      int display_pixels = (max_pixels * effective_brightness) >> 8;
-
-      // Edge case fallback for very low brightness
-      //
-      // Even with the brightness floor, integer truncation can result in display_pixels=0
-      // for some configurations. This fallback ensures at least 1 pixel is enabled for
-      // the most significant bits, which contribute most to perceived brightness.
-      //
-      // The threshold increases with brightness: at very low brightness only bit 7 gets
-      // the minimum; as brightness increases, more bits naturally exceed 0 anyway.
-      //   effective_brightness 1-15:   only bit 7 guaranteed minimum
-      //   effective_brightness 16-31:  bits 6-7 guaranteed minimum
-      //   effective_brightness 32-47:  bits 5-7 guaranteed minimum, etc.
-      const int min_bit_for_display = std::max(0, bit_depth_ - 1 - (effective_brightness >> 4));
-      if (effective_brightness > 0 && display_pixels == 0 && bit >= min_bit_for_display) {
-        display_pixels = 1;
-      }
-
-      // Reserve at least 1 pixel blanking to prevent ghosting at maximum brightness.
-      // Without this margin, brightness=255 would enable all pixels including those
-      // near the LAT pulse, potentially causing visible artifacts.
-      display_pixels = std::min(display_pixels, max_pixels - 1);
-
-      assert(max_pixels >= 2 && "max_pixels < 2: insufficient headroom for safety margin");
-      assert(display_pixels >= 0 && "display_pixels underflow");
-      assert(display_pixels <= max_pixels - 1 && "display_pixels exceeds safety margin");
-
-      // Center the enabled region in the buffer
-      const int x_min = (dma_width_ - display_pixels) / 2;
-      const int x_max = (dma_width_ + display_pixels) / 2;
-
-      assert(x_min >= 0 && "x_min underflow");
-      assert(x_max <= dma_width_ && "x_max exceeds buffer bounds");
-      assert(x_min <= x_max && "x_min > x_max: invalid display region");
-
-      // Apply OE pattern: LOW (enabled) in center, HIGH (blanked) elsewhere
-      for (int x = 0; x < dma_width_; x++) {
-        if (x >= x_min && x < x_max) {
-          buf[x] &= OE_CLEAR_MASK;
-        } else {
-          buf[x] |= (1 << OE_BIT);
-        }
-      }
-
-      // Latch blanking: force OE=HIGH around the LAT pulse
-      //
-      // The LAT (latch) signal on the last pixel transfers shift register data to the
-      // display buffer. The panel needs the display blanked during this transition to
-      // prevent visible artifacts from partially-latched data. Blanking pixels at both
-      // the start and end of the buffer ensures clean transitions regardless of where
-      // the centered display region falls.
-      const int last_pixel = dma_width_ - 1;
-
-      // Blank the LAT pixel itself (always required)
-      buf[last_pixel] |= (1 << OE_BIT);
-
-      // Blank latch_blanking pixels before LAT
-      for (int i = 1; i <= latch_blanking && (last_pixel - i) >= 0; i++) {
-        buf[last_pixel - i] |= (1 << OE_BIT);
-      }
-
-      // Blank latch_blanking pixels at buffer start (for wrap-around from previous row)
-      for (int i = 0; i < latch_blanking && i < dma_width_; i++) {
-        buf[i] |= (1 << OE_BIT);
-      }
-    }
-  }
-}
 
 void GdmaDma::set_brightness_oe() {
   if (!row_buffers_[0]) {
@@ -1071,96 +1012,127 @@ void GdmaDma::set_brightness_oe() {
     return;
   }
 
-  // Calculate brightness scaling (0-255 maps to 0-255)
-  const uint8_t brightness = (uint8_t) ((float) basis_brightness_ * intensity_);
-
-  ESP_LOGD(TAG, "Setting brightness OE: brightness=%u, lsbMsbTransitionBit=%u", brightness, lsbMsbTransitionBit_);
-
-  // Update OE bits in all allocated buffers
-  for (auto &row_buffer : row_buffers_) {
-    if (row_buffer) {
-      set_brightness_oe_internal(row_buffer, brightness);
-    }
+  if (!pad_words_) {
+    ESP_LOGE(TAG, "Quiet pad buffers not allocated");
+    return;
   }
 
-  ESP_LOGD(TAG, "Brightness OE configuration complete");
+  const uint8_t brightness =
+      (uint8_t)((float)basis_brightness_ * intensity_);
+
+  update_quiet_pad_oe(brightness);
 }
 
-bool GdmaDma::build_descriptor_chain_internal(RowBitPlaneBuffer *buffers, dma_descriptor_t *descriptors) {
-  if (!buffers || !descriptors) {
+bool GdmaDma::build_descriptor_chain_internal(RowBitPlaneBuffer *buffers,
+                                              dma_descriptor_t *descriptors) {
+  if (!buffers || !descriptors || !pad_words_) {
     return false;
   }
 
-  size_t pixels_per_bitplane = dma_width_;              // DMA buffer width per bit plane
-  size_t bytes_per_bitplane = pixels_per_bitplane * 2;  // uint16_t = 2 bytes
+  const size_t bytes_per_data_bitplane = dma_width_ * sizeof(uint16_t);
+  const size_t bytes_per_pad = QUIET_PAD_WORDS * sizeof(uint16_t);
 
-  // Link descriptors with BCM repetitions
   size_t desc_idx = 0;
-  for (int row = 0; row < num_rows_; row++) {
-    for (int bit = 0; bit < bit_depth_; bit++) {
-      uint8_t *const bit_buffer = buffers[row].data + (bit * bytes_per_bitplane);
 
-      // Calculate number of descriptor repetitions for this bit plane
-      const int repetitions = (bit <= lsbMsbTransitionBit_) ? 1  // Base timing for LSBs
-                                                            : (1 << (bit - lsbMsbTransitionBit_ - 1));  // BCM weighting
+  auto add_desc = [&](uint8_t *buffer, size_t length_bytes) -> bool {
+    if (desc_idx >= descriptor_count_) {
+      ESP_LOGE(TAG,
+               "Descriptor overflow: desc_idx=%zu descriptor_count=%zu",
+               desc_idx,
+               descriptor_count_);
+      return false;
+    }
 
-      // Create 'repetitions' descriptors, all pointing to the SAME buffer
-      // This achieves BCM timing via temporal repetition
-      for (int rep = 0; rep < repetitions; rep++) {
-        dma_descriptor_t *const desc = &descriptors[desc_idx];
-        desc->dw0.owner = DMA_DESCRIPTOR_BUFFER_OWNER_DMA;
-        desc->dw0.suc_eof = 0;  // EOF only on last descriptor
-        desc->dw0.size = bytes_per_bitplane;
-        desc->dw0.length = bytes_per_bitplane;
-        desc->buffer = bit_buffer;  // Same buffer for all repetitions
+    dma_descriptor_t *const desc = &descriptors[desc_idx];
 
-        // Link to next descriptor
-        if (desc_idx < descriptor_count_ - 1) {
-          desc->next = &descriptors[desc_idx + 1];
+    desc->dw0.owner = DMA_DESCRIPTOR_BUFFER_OWNER_DMA;
+    desc->dw0.suc_eof = 0;
+    desc->dw0.size = length_bytes;
+    desc->dw0.length = length_bytes;
+    desc->buffer = buffer;
+    desc->next = nullptr;
+
+    if (desc_idx > 0) {
+      descriptors[desc_idx - 1].next = desc;
+    }
+
+    desc_idx++;
+    return true;
+  };
+
+  ESP_LOGI(TAG, "Building slot-scanned quiet-pad BCM descriptor chain");
+
+  for (int bit = 0; bit < bit_depth_; bit++) {
+    const int repetitions =
+        (bit <= lsbMsbTransitionBit_)
+            ? 1
+            : (1 << (bit - lsbMsbTransitionBit_ - 1));
+
+    for (int rep = 0; rep < repetitions; rep++) {
+      for (int row = 0; row < num_rows_; row++) {
+        uint8_t *const data_buffer =
+            buffers[row].data + (bit * bytes_per_data_bitplane);
+
+        uint8_t *const pad_buffer =
+            reinterpret_cast<uint8_t *>(pad_row_ptr(row));
+
+        if (!add_desc(data_buffer, bytes_per_data_bitplane)) {
+          return false;
         }
 
-        desc_idx++;
+        if (!add_desc(pad_buffer, bytes_per_pad)) {
+          return false;
+        }
       }
     }
   }
 
-  // Last descriptor loops back to first (continuous refresh)
+  if (desc_idx != descriptor_count_) {
+    ESP_LOGE(TAG,
+             "Descriptor count mismatch: built=%zu expected=%zu",
+             desc_idx,
+             descriptor_count_);
+    return false;
+  }
+
   descriptors[descriptor_count_ - 1].next = &descriptors[0];
-  descriptors[descriptor_count_ - 1].dw0.suc_eof = 1;  // Optional: EOF once per frame
+  descriptors[descriptor_count_ - 1].dw0.suc_eof = 1;
 
   return true;
 }
 
 bool GdmaDma::build_descriptor_chain() {
-  // Calculate total descriptors needed WITH BCM repetitions
-  // For bits <= lsbMsbTransitionBit: 1 descriptor each (base timing)
-  // For bits > lsbMsbTransitionBit: 2^(bit - lsbMsbTransitionBit - 1) descriptors each
-  descriptor_count_ = 0;
-  for (int row = 0; row < num_rows_; row++) {
-    for (int bit = 0; bit < bit_depth_; bit++) {
-      if (bit <= lsbMsbTransitionBit_) {
-        descriptor_count_ += 1;  // Base timing
-      } else {
-        descriptor_count_ += (1 << (bit - lsbMsbTransitionBit_ - 1));  // BCM repetitions
-      }
-    }
-  }
-
-  // Safety check to prevent division by zero
   if (num_rows_ == 0) {
     ESP_LOGE(TAG, "Invalid configuration: num_rows_ is 0");
     return false;
   }
 
-  size_t descriptors_per_row = descriptor_count_ / num_rows_;
-  size_t total_descriptor_bytes = sizeof(dma_descriptor_t) * descriptor_count_;
+  if (!pad_words_) {
+    ESP_LOGE(TAG, "Quiet pad buffers not allocated");
+    return false;
+  }
 
-  ESP_LOGI(TAG, "Building BCM descriptor chain: %zu descriptors (%zu per row) for %d rows × %d bits", descriptor_count_,
-           descriptors_per_row, num_rows_, bit_depth_);
-  ESP_LOGI(TAG, "  BCM via descriptor repetition (lsbMsbTransitionBit=%d)", lsbMsbTransitionBit_);
-  ESP_LOGI(TAG, "  Allocating %zu bytes per descriptor array", total_descriptor_bytes);
+  const size_t bcm_repetitions =
+      GdmaDma::calculate_bcm_transmissions(bit_depth_, lsbMsbTransitionBit_);
 
-  // Free existing descriptors if already allocated (prevent leak on retry)
+  // Slot-scanned:
+  // each repetition = all rows
+  // each row = data descriptor + pad descriptor
+  descriptor_count_ = bcm_repetitions * num_rows_ * 2;
+
+  const size_t total_descriptor_bytes =
+      sizeof(dma_descriptor_t) * descriptor_count_;
+
+	  ESP_LOGI(TAG, "Slot-scanned quiet-pad BCM descriptor chain built: %zu descriptors",
+	           descriptor_count_);
+
+  ESP_LOGI(TAG,
+           "bcm_repetitions=%zu rows=%d row slot=%u data + %d pad",
+           bcm_repetitions,
+           num_rows_,
+           dma_width_,
+           QUIET_PAD_WORDS);
+
   for (auto &descriptor : descriptors_) {
     if (descriptor) {
       heap_caps_free(descriptor);
@@ -1168,38 +1140,44 @@ bool GdmaDma::build_descriptor_chain() {
     }
   }
 
-  // Always allocate first descriptor chain (buffer 0)
-  // Use calloc to zero-initialize descriptor memory (prevents garbage in control bits)
-  descriptors_[0] = (dma_descriptor_t *) heap_caps_calloc(1, total_descriptor_bytes, MALLOC_CAP_DMA);
+  descriptors_[0] = (dma_descriptor_t *)heap_caps_calloc(
+      1,
+      total_descriptor_bytes,
+      MALLOC_CAP_DMA);
+
   if (!descriptors_[0]) {
-    ESP_LOGE(TAG, "Failed to allocate %zu descriptors [0] (%zu bytes) in DMA memory", descriptor_count_,
+    ESP_LOGE(TAG,
+             "Failed to allocate %zu descriptors [0] (%zu bytes)",
+             descriptor_count_,
              total_descriptor_bytes);
     return false;
   }
 
   if (!build_descriptor_chain_internal(row_buffers_[0], descriptors_[0])) {
-    ESP_LOGE(TAG, "Failed to build descriptor chain [0]");
+    ESP_LOGE(TAG, "Failed to build slot-scanned quiet-pad descriptor chain [0]");
     return false;
   }
-  ESP_LOGI(TAG, "BCM descriptor chain [0] built: %zu descriptors in continuous loop", descriptor_count_);
 
-  // Conditionally allocate second descriptor chain (buffer 1)
-  if (config_.double_buffer) {
-    // Use calloc to zero-initialize descriptor memory (prevents garbage in control bits)
-    descriptors_[1] = (dma_descriptor_t *) heap_caps_calloc(1, total_descriptor_bytes, MALLOC_CAP_DMA);
-    if (!descriptors_[1]) {
-      ESP_LOGE(TAG, "Failed to allocate %zu descriptors [1] (%zu bytes) in DMA memory", descriptor_count_,
-               total_descriptor_bytes);
-      return false;
-    }
+		   
+   if (config_.double_buffer) {
+     descriptors_[1] = (dma_descriptor_t *)heap_caps_calloc(
+         1,
+         total_descriptor_bytes,
+         MALLOC_CAP_DMA);
 
-    if (!build_descriptor_chain_internal(row_buffers_[1], descriptors_[1])) {
-      ESP_LOGE(TAG, "Failed to build descriptor chain [1]");
-      return false;
-    }
-    ESP_LOGI(TAG, "BCM descriptor chain [1] built: %zu descriptors in continuous loop (double buffer mode)",
-             descriptor_count_);
-  }
+     if (!descriptors_[1]) {
+       ESP_LOGE(TAG,
+                "Failed to allocate %zu descriptors [1] (%zu bytes)",
+                descriptor_count_,
+                total_descriptor_bytes);
+       return false;
+     }
+
+     if (!build_descriptor_chain_internal(row_buffers_[1], descriptors_[1])) {
+       ESP_LOGE(TAG, "Failed to build slot-scanned quiet-pad descriptor chain [1]");
+       return false;
+     }
+   }
 
   return true;
 }
@@ -1224,56 +1202,61 @@ HUB75_CONST constexpr int GdmaDma::calculate_bcm_transmissions(int bit_depth, in
 }
 
 void GdmaDma::calculate_bcm_timings() {
-  // Calculate buffer transmission time
-  // Buffer contains dma_width_ pixels with LAT on last pixel
-  // Latch blanking is handled via OE bits, not extra pixels
-  const uint16_t buffer_pixels = dma_width_;  // LAT is on last pixel, not extra
-  const float buffer_time_us = (buffer_pixels * 1000000.0f) / actual_clock_hz_;
-
-  ESP_LOGI(TAG, "Buffer transmission time: %.2f µs (%u pixels @ %lu Hz)", buffer_time_us, (unsigned) buffer_pixels,
-           (unsigned long) actual_clock_hz_);
-
-  // Target refresh rate from config
   const uint32_t target_hz = config_.min_refresh_rate;
 
-  // Calculate optimal lsbMsbTransitionBit to achieve target refresh rate
+  const size_t row_slot_words =
+      static_cast<size_t>(dma_width_) + static_cast<size_t>(QUIET_PAD_WORDS);
+
+  const float row_slot_time_us =
+      (row_slot_words * 1000000.0f) / actual_clock_hz_;
+
+  ESP_LOGI(TAG,
+           "Quiet-pad row slot: %zu words = %.2f us (%u data + %d pad @ %lu Hz)",
+           row_slot_words,
+           row_slot_time_us,
+           dma_width_,
+           QUIET_PAD_WORDS,
+           (unsigned long)actual_clock_hz_);
+
   lsbMsbTransitionBit_ = 0;
   int actual_hz = 0;
 
   while (true) {
-    // Calculate transmissions per row with current transition bit
-    const int transmissions = GdmaDma::calculate_bcm_transmissions(bit_depth_, lsbMsbTransitionBit_);
+    const int bcm_repetitions =
+        GdmaDma::calculate_bcm_transmissions(bit_depth_, lsbMsbTransitionBit_);
 
-    // Calculate refresh rate
-    const float time_per_row_us = transmissions * buffer_time_us;
-    const float time_per_frame_us = time_per_row_us * num_rows_;
-    actual_hz = (int) (1000000.0f / time_per_frame_us);
+    const float frame_time_us =
+        row_slot_time_us * num_rows_ * bcm_repetitions;
 
-    ESP_LOGD(TAG, "Testing lsbMsbTransitionBit=%d: %d transmissions/row, %d Hz", lsbMsbTransitionBit_, transmissions,
+    actual_hz = static_cast<int>(1000000.0f / frame_time_us);
+
+    ESP_LOGD(TAG,
+             "Testing lsbMsbTransitionBit=%d: bcm_repetitions=%d, refresh=%d Hz",
+             lsbMsbTransitionBit_,
+             bcm_repetitions,
              actual_hz);
 
-    if (actual_hz >= target_hz) [[likely]]
+    if (actual_hz >= static_cast<int>(target_hz)) {
       break;
+    }
 
-    if (lsbMsbTransitionBit_ < bit_depth_ - 1) [[likely]] {
+    if (lsbMsbTransitionBit_ < bit_depth_ - 1) {
       lsbMsbTransitionBit_++;
     } else {
-      ESP_LOGW(TAG, "Cannot achieve target %lu Hz, max is %d Hz", (unsigned long) target_hz, actual_hz);
+      ESP_LOGW(TAG,
+               "Cannot achieve target %lu Hz, max is %d Hz",
+               (unsigned long)target_hz,
+               actual_hz);
       break;
     }
   }
 
-  ESP_LOGI(TAG, "lsbMsbTransitionBit=%d achieves %d Hz (target %lu Hz)", lsbMsbTransitionBit_, actual_hz,
-           (unsigned long) target_hz);
-
-  if (lsbMsbTransitionBit_ > 0) {
-    ESP_LOGW(TAG,
-             "Using lsbMsbTransitionBit=%d, lower %d bits show once "
-             "(reduced color depth for speed)",
-             lsbMsbTransitionBit_, lsbMsbTransitionBit_ + 1);
-  }
-
-  ESP_LOGI(TAG, "BCM timing calculated (lsbMsbTransitionBit used by set_brightness_oe for OE control)");
+  ESP_LOGI(TAG,
+           "Quiet-pad BCM: bit_depth=%d, lsbMsbTransitionBit=%d, refresh=%d Hz target=%lu",
+           bit_depth_,
+           lsbMsbTransitionBit_,
+           actual_hz,
+           (unsigned long)target_hz);
 }
 
 // ============================================================================

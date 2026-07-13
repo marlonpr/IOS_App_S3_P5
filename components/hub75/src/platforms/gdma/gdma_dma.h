@@ -171,6 +171,26 @@ class GdmaDma : public PlatformDma {
   // Brightness control (implementation of base class interface)
   uint8_t basis_brightness_;  // 1-255
   float intensity_;           // 0.0-1.0
+  
+  
+  
+  
+  
+  static constexpr bool QUIET_PAD_SINGLE_BIT_DIAG = true;
+  static constexpr int QUIET_PAD_DIAG_BIT = 7;
+  static constexpr int QUIET_PAD_WORDS = 2024;
+  static constexpr int PAD_GUARD_HEAD = 8;
+  static constexpr int PAD_GUARD_TAIL = 8;
+
+  uint16_t *pad_words_ = nullptr;
+
+  uint16_t *pad_row_ptr(int row);
+  void initialize_pad_buffers();
+  void update_quiet_pad_oe(uint8_t brightness);
+  
+  
+  
+  
 };
 
 }  // namespace hub75
