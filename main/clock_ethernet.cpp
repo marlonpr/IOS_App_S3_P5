@@ -28,6 +28,7 @@
 #include "driver/gpio.h"
 
 #include "clock_mdns.h"
+#include "clock_protocol_stream.h"
 #include "logo_upload_server.h"
 
 static const char *TAG = "CLOCK_ETHERNET";
@@ -189,6 +190,28 @@ static void log_tcp_packet(const uint8_t *data, int len)
     }
 }
 
+static bool send_all(int socket_fd, const uint8_t *data, size_t length)
+{
+    size_t offset = 0;
+
+    while (offset < length) {
+        int sent = send(socket_fd, data + offset, length - offset, 0);
+
+        if (sent < 0 && errno == EINTR) {
+            continue;
+        }
+
+        if (sent <= 0) {
+            ESP_LOGE(TAG, "TCP send failed: errno %d", errno);
+            return false;
+        }
+
+        offset += (size_t)sent;
+    }
+
+    return true;
+}
+
 static bool send_protocol_ack(int client_sock, const uint8_t *rx, int len)
 {
     if (rx == NULL || len < 6) {
@@ -223,18 +246,58 @@ static bool send_protocol_ack(int client_sock, const uint8_t *rx, int len)
              ack[4],
              ack[5]);
 
-    int sent = send(client_sock, ack, sizeof(ack), 0);
-
-    return sent == sizeof(ack);
+    return send_all(client_sock, ack, sizeof(ack));
 }
 
 // ================= TCP SERVER TASK =================
 
-// ================= TCP SERVER TASK =================
+typedef struct {
+    int client_sock;
+} tcp_frame_context_t;
+
+static void dispatch_protocol_frame(const uint8_t *frame,
+                                    size_t length,
+                                    void *context)
+{
+    if (frame == nullptr || context == nullptr || length == 0 ||
+        length > CLOCK_PROTOCOL_STREAM_CAPACITY) {
+        return;
+    }
+
+    auto *frame_context = static_cast<tcp_frame_context_t *>(context);
+    uint8_t tx_buffer[CLOCK_PROTOCOL_STREAM_CAPACITY] = {};
+    int tx_len = -1;
+
+    if (s_rx_callback != nullptr) {
+        tx_len = s_rx_callback(frame,
+                               (int)length,
+                               tx_buffer,
+                               sizeof(tx_buffer));
+    }
+
+    if (tx_len > 0) {
+        if ((size_t)tx_len > sizeof(tx_buffer)) {
+            ESP_LOGE(TAG,
+                     "Protocol response exceeds TX capacity: %d",
+                     tx_len);
+            return;
+        }
+
+        ESP_LOGI(TAG, "Sending custom response: %d bytes", tx_len);
+        log_tcp_packet(tx_buffer, tx_len);
+        send_all(frame_context->client_sock, tx_buffer, (size_t)tx_len);
+    } else if (tx_len == 0) {
+        send_protocol_ack(frame_context->client_sock,
+                          frame,
+                          (int)length);
+    } else {
+        ESP_LOGI(TAG, "No response sent");
+    }
+}
 
 static void tcp_server_task(void *pvParameters)
 {
-    char rx_buffer[128];
+    uint8_t rx_buffer[CLOCK_PROTOCOL_STREAM_CAPACITY];
 
     struct sockaddr_in server_addr = {};
     server_addr.sin_addr.s_addr = htonl(INADDR_ANY);
@@ -297,6 +360,12 @@ static void tcp_server_task(void *pvParameters)
          * It expects binary protocol only.
          */
 
+        clock_protocol_stream_t stream = {};
+        clock_protocol_stream_init(&stream);
+        tcp_frame_context_t frame_context = {
+            .client_sock = client_sock,
+        };
+
         while (true) {
             int len = recv(client_sock,
                            rx_buffer,
@@ -314,28 +383,17 @@ static void tcp_server_task(void *pvParameters)
             }
 
             ESP_LOGI(TAG, "TCP RX %d bytes", len);
-            log_tcp_packet((const uint8_t *)rx_buffer, len);
+            log_tcp_packet(rx_buffer, len);
 
-            uint8_t tx_buffer[64];
-            int tx_len = 0;
+            clock_protocol_stream_result_t stream_result =
+                clock_protocol_stream_consume(&stream,
+                                              rx_buffer,
+                                              (size_t)len,
+                                              dispatch_protocol_frame,
+                                              &frame_context);
 
-            if (s_rx_callback != NULL) {
-                tx_len = s_rx_callback((const uint8_t *)rx_buffer,
-                                       len,
-                                       tx_buffer,
-                                       sizeof(tx_buffer));
-            }
-
-            if (tx_len > 0) {
-                ESP_LOGI(TAG, "Sending custom response: %d bytes", tx_len);
-                log_tcp_packet(tx_buffer, tx_len);
-                send(client_sock, tx_buffer, tx_len, 0);
-            } else if (tx_len == 0) {
-                send_protocol_ack(client_sock,
-                                  (const uint8_t *)rx_buffer,
-                                  len);
-            } else {
-                ESP_LOGI(TAG, "No response sent");
+            if (stream_result.overflowed) {
+                ESP_LOGW(TAG, "RX frame overflow, accumulator reset");
             }
         }
 

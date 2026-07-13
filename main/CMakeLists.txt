@@ -7,10 +7,12 @@ idf_component_register(
     "clock_ethernet.cpp" 
     "clock_alarm.cpp" 
     "clock_protocol.cpp" 
+    "clock_protocol_stream.cpp"
     "clock_modes.cpp"
     "clock_mdns.cpp"
     "clock_sd_card.cpp"
     "clock_logo_manager.cpp"
+    "clock_palette.cpp"
     "logo_upload_server.cpp"
     INCLUDE_DIRS "."
     REQUIRES led_panel 

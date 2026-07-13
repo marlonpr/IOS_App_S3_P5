@@ -4,6 +4,7 @@
 
 #include "led_panel.h"
 #include "clock_logo_manager.h"
+#include "clock_palette.h"
 
 // =============================== DATE TEXT ===============================
 
@@ -199,29 +200,12 @@ static int safe_second(const ds3231_time_t *time)
     return second;
 }
 
-static void get_temp_color(float temp_c, uint8_t *r, uint8_t *g, uint8_t *b)
+static bool get_temp_color(float temp_c,
+                           const clock_mode_palette_t *palette,
+                           clock_rgb_t *out_color)
 {
-    if (!r || !g || !b) {
-        return;
-    }
-
-    if (temp_c < 10.0f) {
-        *r = 255;
-        *g = 255;
-        *b = 255;
-    } else if (temp_c < 20.0f) {
-        *r = 0;
-        *g = 255;
-        *b = 255;
-    } else if (temp_c < 30.0f) {
-        *r = 255;
-        *g = 65;
-        *b = 0;
-    } else {
-        *r = 255;
-        *g = 0;
-        *b = 0;
-    }
+    return clock_palette_snapshot_get_temperature_color(
+        palette, temp_c, out_color);
 }
 
 static void make_temp_text(char *buf,
@@ -297,6 +281,18 @@ void clock_display_draw_mode_1(Hub75Driver *driver,
         return;
     }
 
+    clock_mode_palette_t palette = {};
+    clock_rgb_t time_color = {};
+    clock_rgb_t date_color = {};
+
+    if (!clock_palette_get_mode_snapshot(CLOCK_PALETTE_MODE_1, &palette) ||
+        !clock_palette_snapshot_get_color(
+            &palette, CLOCK_PALETTE_ROLE_TIME, &time_color) ||
+        !clock_palette_snapshot_get_color(
+            &palette, CLOCK_PALETTE_ROLE_DATE, &date_color)) {
+        return;
+    }
+
     char line1[32];
     char line2[16];
 
@@ -306,7 +302,12 @@ void clock_display_draw_mode_1(Hub75Driver *driver,
 	                                    date_scroll_text,
 	                                    sizeof(date_scroll_text));
 
-	scroll_start_if_needed(date_scroll_text, 12, 0, 255, 0, 10);
+	scroll_start_if_needed(date_scroll_text,
+	                       12,
+	                       date_color.r,
+	                       date_color.g,
+	                       date_color.b,
+	                       10);
 	scroll_update(*driver);
 
     int hour = get_display_hour(time, format);
@@ -327,17 +328,29 @@ void clock_display_draw_mode_1(Hub75Driver *driver,
                  second);
     }
 
-    draw_string(*driver, 4, 1, line1, 255, 255, 255);
+    draw_string(*driver,
+                4,
+                1,
+                line1,
+                time_color.r,
+                time_color.g,
+                time_color.b);
 
-    uint8_t r_temp = 255;
-    uint8_t g_temp = 255;
-    uint8_t b_temp = 255;
+    clock_rgb_t temp_color = {};
 
-    get_temp_color(temp_c, &r_temp, &g_temp, &b_temp);
+    if (!get_temp_color(temp_c, &palette, &temp_color)) {
+        return;
+    }
     make_temp_text(line2, sizeof(line2), temp_c, temp_valid, true);
 
     if (temp_valid) {
-        draw_string(*driver, 20, 22, line2, r_temp, g_temp, b_temp);
+        draw_string(*driver,
+                    20,
+                    22,
+                    line2,
+                    temp_color.r,
+                    temp_color.g,
+                    temp_color.b);
     } else {
         draw_string(*driver, 20, 22, "T E", 255, 0, 0);
     }
@@ -350,6 +363,18 @@ void clock_display_draw_mode_2(Hub75Driver *driver,
                                hour_format_t format)
 {
     if (!driver || !time) {
+        return;
+    }
+
+    clock_mode_palette_t palette = {};
+    clock_rgb_t time_color = {};
+    clock_rgb_t date_color = {};
+
+    if (!clock_palette_get_mode_snapshot(CLOCK_PALETTE_MODE_2, &palette) ||
+        !clock_palette_snapshot_get_color(
+            &palette, CLOCK_PALETTE_ROLE_TIME, &time_color) ||
+        !clock_palette_snapshot_get_color(
+            &palette, CLOCK_PALETTE_ROLE_DATE, &date_color)) {
         return;
     }
 
@@ -366,11 +391,11 @@ void clock_display_draw_mode_2(Hub75Driver *driver,
 
     bool colon_on = (second % 2) == 0;
 
-    uint8_t r_temp = 255;
-    uint8_t g_temp = 255;
-    uint8_t b_temp = 255;
+    clock_rgb_t temp_color = {};
 
-    get_temp_color(temp_c, &r_temp, &g_temp, &b_temp);
+    if (!get_temp_color(temp_c, &palette, &temp_color)) {
+        return;
+    }
 
     /*
      * Top scrolling date line.
@@ -384,7 +409,12 @@ void clock_display_draw_mode_2(Hub75Driver *driver,
 	                                    date_scroll_text,
 	                                    sizeof(date_scroll_text));
 
-	scroll_start_if_needed(date_scroll_text, 2, 0, 0, 255, 10);
+	scroll_start_if_needed(date_scroll_text,
+	                       2,
+	                       date_color.r,
+	                       date_color.g,
+	                       date_color.b,
+	                       10);
 	scroll_update(*driver);
 
     /*
@@ -396,13 +426,31 @@ void clock_display_draw_mode_2(Hub75Driver *driver,
      */
     if (format == FORMAT_12H) {
         if (time->hour >= 12) {
-            draw_string_5x5(*driver, 51, 16, "&$", 255, 255, 255); // PM
+            draw_string_5x5(*driver,
+                            51,
+                            16,
+                            "&$",
+                            time_color.r,
+                            time_color.g,
+                            time_color.b); // PM
         } else {
-            draw_string_5x5(*driver, 51, 16, "#$", 255, 255, 255); // AM
+            draw_string_5x5(*driver,
+                            51,
+                            16,
+                            "#$",
+                            time_color.r,
+                            time_color.g,
+                            time_color.b); // AM
         }
     } else {
         snprintf(buf_second, sizeof(buf_second), "%02d", second);
-        draw_string_5x5(*driver, 51, 16, buf_second, 255, 255, 255);
+        draw_string_5x5(*driver,
+                        51,
+                        16,
+                        buf_second,
+                        time_color.r,
+                        time_color.g,
+                        time_color.b);
     }
 
     /*
@@ -428,17 +476,17 @@ void clock_display_draw_mode_2(Hub75Driver *driver,
 	                      9 + pos_hour,
 	                      14,
 	                      buf_hour,
-	                      255,
-	                      255,
-	                      255);
+	                      time_color.r,
+	                      time_color.g,
+	                      time_color.b);
 
 	    draw_string_10x15(*driver,
 	                      27 + pos_hour,
 	                      14,
 	                      buf_minute,
-	                      255,
-	                      255,
-	                      255);
+	                      time_color.r,
+	                      time_color.g,
+	                      time_color.b);
 	} else {
         buf_hour[0] = '0' + (hour / 10);
         buf_hour[1] = '0' + (hour % 10);
@@ -456,17 +504,17 @@ void clock_display_draw_mode_2(Hub75Driver *driver,
                         pos_hour,
                         14,
                         buf_hour,
-                        255,
-                        255,
-                        255);
+                        time_color.r,
+                        time_color.g,
+                        time_color.b);
 
         draw_string_10x15(*driver,
                         27 + pos_hour,
                         14,
                         buf_minute,
-                        255,
-                        255,
-                        255);
+                        time_color.r,
+                        time_color.g,
+                        time_color.b);
     }
 
     /*
@@ -492,17 +540,17 @@ void clock_display_draw_mode_2(Hub75Driver *driver,
 	                     colon_x,
 	                     17,
 	                     colon_on ? "!" : " ",
-	                     255,
-	                     255,
-	                     255);
+	                     time_color.r,
+	                     time_color.g,
+	                     time_color.b);
 	 } else {
 	     draw_string_2x9(*driver,
 	                     colon_x,
 	                     17,
 	                     "!",
-	                     255,
-	                     255,
-	                     255);
+	                     time_color.r,
+	                     time_color.g,
+	                     time_color.b);
 	 }
 
     /*
@@ -526,25 +574,25 @@ void clock_display_draw_mode_2(Hub75Driver *driver,
                         50,
                         26,
                         buf_temp,
-                        r_temp,
-                        g_temp,
-                        b_temp);
+                        temp_color.r,
+                        temp_color.g,
+                        temp_color.b);
 
         draw_string_2x9(*driver,
                         57,
                         26,
                         "#",
-                        r_temp,
-                        g_temp,
-                        b_temp);
+                        temp_color.r,
+                        temp_color.g,
+                        temp_color.b);
 						
 		draw_string_3x5(*driver,
 		                60,
 		                26,
 		                "$",
-		                r_temp,
-		                g_temp,
-		                b_temp);
+		                temp_color.r,
+		                temp_color.g,
+		                temp_color.b);
     } else {
         draw_string_3x5(*driver,
                         50,
@@ -566,11 +614,22 @@ void clock_display_draw_mode_3(Hub75Driver *driver,
         return;
     }
 
-    uint8_t r_temp = 255;
-    uint8_t g_temp = 255;
-    uint8_t b_temp = 255;
+    clock_mode_palette_t palette = {};
+    clock_rgb_t time_color = {};
+    clock_rgb_t date_color = {};
+    clock_rgb_t weekday_color = {};
+    clock_rgb_t temp_color = {};
 
-    get_temp_color(temp_c, &r_temp, &g_temp, &b_temp);
+    if (!clock_palette_get_mode_snapshot(CLOCK_PALETTE_MODE_3, &palette) ||
+        !clock_palette_snapshot_get_color(
+            &palette, CLOCK_PALETTE_ROLE_TIME, &time_color) ||
+        !clock_palette_snapshot_get_color(
+            &palette, CLOCK_PALETTE_ROLE_DATE, &date_color) ||
+        !clock_palette_snapshot_get_color(
+            &palette, CLOCK_PALETTE_ROLE_WEEKDAY, &weekday_color) ||
+        !get_temp_color(temp_c, &palette, &temp_color)) {
+        return;
+    }
 
     int weekday_index = get_weekday_index(time);
     int pos_day = get_weekday_x_position(weekday_index);
@@ -583,9 +642,9 @@ void clock_display_draw_mode_3(Hub75Driver *driver,
                 1 + pos_day,
                 1,
                 buf_day,
-                0,
-                255,
-                0);
+                weekday_color.r,
+                weekday_color.g,
+                weekday_color.b);
 
     char buf_date[32];
 
@@ -600,9 +659,9 @@ void clock_display_draw_mode_3(Hub75Driver *driver,
                 4,
                 11,
                 buf_date,
-                0,
-                0,
-                255);
+                date_color.r,
+                date_color.g,
+                date_color.b);
 
     int hour = get_display_hour(time, format);
     int minute = safe_minute(time);
@@ -630,9 +689,9 @@ void clock_display_draw_mode_3(Hub75Driver *driver,
                 2,
                 22,
                 buf_time,
-                255,
-                255,
-                255);
+                time_color.r,
+                time_color.g,
+                time_color.b);
 
     char buf_temp[16];
 
@@ -647,17 +706,17 @@ void clock_display_draw_mode_3(Hub75Driver *driver,
                     43,
                     22,
                     buf_temp,
-                    r_temp,
-                    g_temp,
-                    b_temp);
+                    temp_color.r,
+                    temp_color.g,
+                    temp_color.b);
 					
 		draw_string(*driver,
 		            57,
 		            22,
 		            "*",
-		            r_temp,
-		            g_temp,
-		            b_temp);
+		            temp_color.r,
+		            temp_color.g,
+		            temp_color.b);
     } else {
         draw_string(*driver,
                     43,

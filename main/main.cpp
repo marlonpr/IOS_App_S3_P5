@@ -20,6 +20,7 @@
 #include "clock_modes.h"
 #include "clock_sd_card.h"
 #include "clock_logo_manager.h"
+#include "clock_palette.h"
 
 #include "clock_mdns.h"
 
@@ -229,6 +230,15 @@ void display_update_task(void* pvParameters)
 		        ESP_LOGE(TAG,
 		                 "Failed to save cleared alarms after factory reset: %s",
 		                 esp_err_to_name(alarm_save_ret));
+		    }
+
+		    esp_err_t palette_reset_ret =
+		        clock_palette_restore_all_defaults();
+
+		    if (palette_reset_ret != ESP_OK) {
+		        ESP_LOGE(TAG,
+		                 "Failed to clear palette overrides after factory reset: %s",
+		                 esp_err_to_name(palette_reset_ret));
 		    }
 
 		    ESP_LOGW(TAG, "Factory reset from Ethernet applied");
@@ -455,10 +465,9 @@ void display_update_task(void* pvParameters)
 
 				case MODE_2:
 				{
-				    //fixed_item_t active_fixed_item = clock_modes_get_fixed_item();
+				    fixed_item_t active_fixed_item = clock_modes_get_fixed_item();
 
-				    //if (active_fixed_item == FIXED_ITEM_LOGO) {
-					if (true) {
+				    if (active_fixed_item == FIXED_ITEM_LOGO) {
 				        scroll_stop();
 				        clock_display_draw_logo(driver);
 				    } else {
@@ -1024,6 +1033,13 @@ extern "C" void app_main(void)
     }
 	
 	ESP_ERROR_CHECK(clock_settings_init());	
+
+	esp_err_t palette_init_ret = clock_palette_init();
+	if (palette_init_ret != ESP_OK) {
+	    ESP_LOGW(TAG,
+	             "Palette NVS load failed, compiled defaults remain active: %s",
+	             esp_err_to_name(palette_init_ret));
+	}
 	
 	ESP_ERROR_CHECK(clock_alarm_init(ALARM_GPIO));		
 	

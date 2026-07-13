@@ -26,7 +26,7 @@ esp_err_t clock_ethernet_init_dhcp(void);
 
 /*
  * Start TCP server.
- * The callback is called whenever TCP data is received.
+ * The callback is called once for each complete protocol frame.
  */
 esp_err_t clock_ethernet_start_tcp_server(clock_ethernet_rx_callback_t rx_callback);
 

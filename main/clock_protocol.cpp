@@ -5,6 +5,7 @@
 
 #include "clock_alarm.h"
 #include "clock_menu.h"
+#include "clock_palette.h"
 
 #include "clock_logo_manager.h"
 #include "clock_modes.h"
@@ -125,6 +126,514 @@ static bool is_ascii_hex(uint8_t value)
         (value >= 'a' && value <= 'f');
 }
 
+static constexpr uint8_t kPaletteProtocolMaxRoles = 16;
+
+typedef enum {
+    PALETTE_STATUS_SUCCESS = 0x00,
+    PALETTE_STATUS_UNSUPPORTED_MODE = 0x01,
+    PALETTE_STATUS_UNSUPPORTED_VERSION = 0x02,
+    PALETTE_STATUS_INVALID_COUNT_OR_LENGTH = 0x03,
+    PALETTE_STATUS_DUPLICATE_ROLE = 0x04,
+    PALETTE_STATUS_UNSUPPORTED_ROLE = 0x05,
+    PALETTE_STATUS_INCOMPLETE_ROLE_SET = 0x06,
+    PALETTE_STATUS_INVALID_HEX = 0x07,
+    PALETTE_STATUS_NVS_FAILURE = 0x08,
+    PALETTE_STATUS_BUSY = 0x09,
+    PALETTE_STATUS_INTERNAL_FAILURE = 0x0A,
+} palette_protocol_status_t;
+
+static int ascii_hex_nibble(uint8_t value)
+{
+    if (value >= '0' && value <= '9') {
+        return value - '0';
+    }
+
+    if (value >= 'A' && value <= 'F') {
+        return value - 'A' + 10;
+    }
+
+    if (value >= 'a' && value <= 'f') {
+        return value - 'a' + 10;
+    }
+
+    return -1;
+}
+
+static bool decode_ascii_hex_u8(const uint8_t *input, uint8_t *out_value)
+{
+    if (input == nullptr || out_value == nullptr) {
+        return false;
+    }
+
+    int high = ascii_hex_nibble(input[0]);
+    int low = ascii_hex_nibble(input[1]);
+
+    if (high < 0 || low < 0) {
+        return false;
+    }
+
+    *out_value = (uint8_t)((high << 4) | low);
+    return true;
+}
+
+static void encode_ascii_hex_u8(uint8_t value, uint8_t *output)
+{
+    static constexpr char kHexDigits[] = "0123456789ABCDEF";
+
+    output[0] = (uint8_t)kHexDigits[value >> 4];
+    output[1] = (uint8_t)kHexDigits[value & 0x0F];
+}
+
+static bool palette_tx_has_capacity(uint8_t *tx,
+                                    int tx_max,
+                                    size_t required)
+{
+    return tx != nullptr && tx_max >= 0 && (size_t)tx_max >= required;
+}
+
+static void write_palette_response_prefix(uint8_t *tx,
+                                          uint8_t board_id,
+                                          uint8_t command_1,
+                                          uint8_t command_2)
+{
+    tx[0] = '/';
+    tx[1] = 't';
+    tx[2] = 'a';
+    tx[3] = board_id;
+    tx[4] = command_1;
+    tx[5] = command_2;
+}
+
+static int build_palette_ack(uint8_t *tx,
+                             int tx_max,
+                             uint8_t board_id,
+                             uint8_t command_1,
+                             uint8_t command_2,
+                             uint8_t mode,
+                             palette_protocol_status_t status)
+{
+    static constexpr size_t kAckLength = 11;
+
+    if (!palette_tx_has_capacity(tx, tx_max, kAckLength)) {
+        ESP_LOGE(TAG, "TX buffer too small for palette ACK");
+        return -1;
+    }
+
+    write_palette_response_prefix(tx,
+                                  board_id,
+                                  command_1,
+                                  command_2);
+    encode_ascii_hex_u8(mode, &tx[6]);
+    encode_ascii_hex_u8((uint8_t)status, &tx[8]);
+    tx[10] = '\\';
+    return (int)kAckLength;
+}
+
+static int build_lp_error_response(uint8_t *tx,
+                                   int tx_max,
+                                   uint8_t board_id,
+                                   uint8_t mode,
+                                   palette_protocol_status_t status)
+{
+    static constexpr size_t kErrorLength = 15;
+
+    if (!palette_tx_has_capacity(tx, tx_max, kErrorLength)) {
+        ESP_LOGE(TAG, "TX buffer too small for LP error response");
+        return -1;
+    }
+
+    write_palette_response_prefix(tx, board_id, 'l', 'p');
+    encode_ascii_hex_u8(mode, &tx[6]);
+    encode_ascii_hex_u8((uint8_t)status, &tx[8]);
+    encode_ascii_hex_u8(0, &tx[10]);
+    encode_ascii_hex_u8(0, &tx[12]);
+    tx[14] = '\\';
+    return (int)kErrorLength;
+}
+
+static void sort_palette_entries(clock_mode_palette_t *palette)
+{
+    if (palette == nullptr || palette->count > CLOCK_PALETTE_MAX_ROLES) {
+        return;
+    }
+
+    for (uint8_t i = 1; i < palette->count; ++i) {
+        clock_palette_entry_t entry = palette->entries[i];
+        uint8_t position = i;
+
+        while (position > 0 &&
+               palette->entries[position - 1].role > entry.role) {
+            palette->entries[position] = palette->entries[position - 1];
+            position--;
+        }
+
+        palette->entries[position] = entry;
+    }
+}
+
+static bool palette_snapshot_is_complete(
+    const clock_mode_palette_t *palette)
+{
+    if (palette == nullptr ||
+        !clock_palette_is_supported_mode(palette->mode) ||
+        palette->count == 0 ||
+        palette->count > CLOCK_PALETTE_MAX_ROLES) {
+        return false;
+    }
+
+    clock_mode_palette_t factory = {};
+
+    if (!clock_palette_get_factory_snapshot(palette->mode, &factory) ||
+        palette->count != factory.count) {
+        return false;
+    }
+
+    for (uint8_t i = 0; i < palette->count; ++i) {
+        uint8_t role = palette->entries[i].role;
+
+        if (!clock_palette_is_supported_role(palette->mode, role)) {
+            return false;
+        }
+
+        for (uint8_t previous = 0; previous < i; ++previous) {
+            if (palette->entries[previous].role == role) {
+                return false;
+            }
+        }
+    }
+
+    return true;
+}
+
+static int build_lp_success_response(uint8_t *tx,
+                                     int tx_max,
+                                     uint8_t board_id,
+                                     uint8_t mode,
+                                     const clock_mode_palette_t *palette)
+{
+    if (!palette_snapshot_is_complete(palette)) {
+        return build_lp_error_response(tx,
+                                       tx_max,
+                                       board_id,
+                                       mode,
+                                       PALETTE_STATUS_INTERNAL_FAILURE);
+    }
+
+    clock_mode_palette_t sorted = *palette;
+    sort_palette_entries(&sorted);
+
+    size_t response_length = 15 + ((size_t)sorted.count * 8);
+
+    if (!palette_tx_has_capacity(tx, tx_max, response_length)) {
+        ESP_LOGE(TAG, "TX buffer too small for LP success response");
+        return -1;
+    }
+
+    write_palette_response_prefix(tx, board_id, 'l', 'p');
+    encode_ascii_hex_u8(mode, &tx[6]);
+    encode_ascii_hex_u8(PALETTE_STATUS_SUCCESS, &tx[8]);
+    encode_ascii_hex_u8(CLOCK_PALETTE_SCHEMA_VERSION, &tx[10]);
+    encode_ascii_hex_u8(sorted.count, &tx[12]);
+
+    size_t offset = 14;
+
+    for (uint8_t i = 0; i < sorted.count; ++i) {
+        const clock_palette_entry_t *entry = &sorted.entries[i];
+
+        encode_ascii_hex_u8(entry->role, &tx[offset]);
+        encode_ascii_hex_u8(entry->color.r, &tx[offset + 2]);
+        encode_ascii_hex_u8(entry->color.g, &tx[offset + 4]);
+        encode_ascii_hex_u8(entry->color.b, &tx[offset + 6]);
+        offset += 8;
+    }
+
+    tx[offset] = '\\';
+    return (int)response_length;
+}
+
+static palette_protocol_status_t map_palette_result(esp_err_t result)
+{
+    if (result == ESP_OK) {
+        return PALETTE_STATUS_SUCCESS;
+    }
+
+    if (result == ESP_ERR_TIMEOUT) {
+        return PALETTE_STATUS_BUSY;
+    }
+
+    if (result == ESP_ERR_INVALID_ARG ||
+        result == ESP_ERR_INVALID_SIZE ||
+        result == ESP_ERR_INVALID_STATE) {
+        return PALETTE_STATUS_INTERNAL_FAILURE;
+    }
+
+    return PALETTE_STATUS_NVS_FAILURE;
+}
+
+static bool is_palette_command(const uint8_t *p, int len)
+{
+    if (p == nullptr || len < 6 ||
+        p[0] != '/' || p[1] != 'T' || p[2] != 'A') {
+        return false;
+    }
+
+    return (p[4] == 'L' && p[5] == 'P') ||
+           (p[4] == 'C' && p[5] == 'P') ||
+           (p[4] == 'D' && p[5] == 'P');
+}
+
+static int handle_lp_command(const uint8_t *p,
+                             int len,
+                             uint8_t *tx,
+                             int tx_max)
+{
+    uint8_t board_id = p[3];
+    uint8_t mode = 0;
+
+    if (board_id != 0x00 || board_id == 0x5C) {
+        ESP_LOGW(TAG, "Ignoring LP command for invalid board ID: %u", board_id);
+        return -1;
+    }
+
+    palette_protocol_status_t status = PALETTE_STATUS_SUCCESS;
+
+    if (len < 8) {
+        status = PALETTE_STATUS_INVALID_COUNT_OR_LENGTH;
+    } else if (!decode_ascii_hex_u8(&p[6], &mode)) {
+        status = PALETTE_STATUS_INVALID_HEX;
+    } else if (!clock_palette_is_supported_mode(mode)) {
+        status = PALETTE_STATUS_UNSUPPORTED_MODE;
+    } else if (len != 9 || p[8] != '\\') {
+        status = PALETTE_STATUS_INVALID_COUNT_OR_LENGTH;
+    }
+
+    if (status != PALETTE_STATUS_SUCCESS) {
+        ESP_LOGW(TAG,
+                 "LP palette request rejected: mode=%u status=%02X",
+                 mode,
+                 status);
+        return build_lp_error_response(tx,
+                                       tx_max,
+                                       board_id,
+                                       mode,
+                                       status);
+    }
+
+    ESP_LOGI(TAG, "LP palette request: mode=%u", mode);
+
+    clock_mode_palette_t palette = {};
+
+    if (!clock_palette_get_mode_snapshot(mode, &palette)) {
+        return build_lp_error_response(tx,
+                                       tx_max,
+                                       board_id,
+                                       mode,
+                                       PALETTE_STATUS_INTERNAL_FAILURE);
+    }
+
+    return build_lp_success_response(tx,
+                                     tx_max,
+                                     board_id,
+                                     mode,
+                                     &palette);
+}
+
+static int handle_cp_command(const uint8_t *p,
+                             int len,
+                             uint8_t *tx,
+                             int tx_max)
+{
+    uint8_t board_id = p[3];
+    uint8_t mode = 0;
+    uint8_t version = 0;
+    uint8_t count = 0;
+    palette_protocol_status_t status = PALETTE_STATUS_SUCCESS;
+
+    if (board_id != 0x00 || board_id == 0x5C) {
+        ESP_LOGW(TAG, "Ignoring CP command for invalid board ID: %u", board_id);
+        return -1;
+    }
+
+    if (len < 8) {
+        status = PALETTE_STATUS_INVALID_COUNT_OR_LENGTH;
+    } else if (!decode_ascii_hex_u8(&p[6], &mode)) {
+        status = PALETTE_STATUS_INVALID_HEX;
+    } else if (!clock_palette_is_supported_mode(mode)) {
+        status = PALETTE_STATUS_UNSUPPORTED_MODE;
+    } else if (len < 13 || p[len - 1] != '\\') {
+        status = PALETTE_STATUS_INVALID_COUNT_OR_LENGTH;
+    } else if (!decode_ascii_hex_u8(&p[8], &version) ||
+               !decode_ascii_hex_u8(&p[10], &count)) {
+        status = PALETTE_STATUS_INVALID_HEX;
+    } else if (version != CLOCK_PALETTE_SCHEMA_VERSION) {
+        status = PALETTE_STATUS_UNSUPPORTED_VERSION;
+    } else if (count == 0 || count > kPaletteProtocolMaxRoles) {
+        status = PALETTE_STATUS_INVALID_COUNT_OR_LENGTH;
+    } else {
+        size_t expected_length = 13 + ((size_t)count * 8);
+
+        if ((size_t)len != expected_length) {
+            status = PALETTE_STATUS_INVALID_COUNT_OR_LENGTH;
+        }
+    }
+
+    clock_palette_entry_t entries[kPaletteProtocolMaxRoles] = {};
+
+    if (status == PALETTE_STATUS_SUCCESS) {
+        for (uint8_t i = 0; i < count; ++i) {
+            size_t offset = 12 + ((size_t)i * 8);
+
+            if (!decode_ascii_hex_u8(&p[offset], &entries[i].role) ||
+                !decode_ascii_hex_u8(&p[offset + 2], &entries[i].color.r) ||
+                !decode_ascii_hex_u8(&p[offset + 4], &entries[i].color.g) ||
+                !decode_ascii_hex_u8(&p[offset + 6], &entries[i].color.b)) {
+                status = PALETTE_STATUS_INVALID_HEX;
+                break;
+            }
+        }
+    }
+
+    if (status == PALETTE_STATUS_SUCCESS) {
+        for (uint8_t i = 0; i < count; ++i) {
+            for (uint8_t previous = 0; previous < i; ++previous) {
+                if (entries[previous].role == entries[i].role) {
+                    status = PALETTE_STATUS_DUPLICATE_ROLE;
+                    break;
+                }
+            }
+
+            if (status != PALETTE_STATUS_SUCCESS) {
+                break;
+            }
+        }
+    }
+
+    if (status == PALETTE_STATUS_SUCCESS) {
+        for (uint8_t i = 0; i < count; ++i) {
+            if (!clock_palette_is_supported_role(mode, entries[i].role)) {
+                status = PALETTE_STATUS_UNSUPPORTED_ROLE;
+                break;
+            }
+        }
+    }
+
+    if (status == PALETTE_STATUS_SUCCESS) {
+        clock_mode_palette_t factory = {};
+
+        if (!clock_palette_get_factory_snapshot(mode, &factory)) {
+            status = PALETTE_STATUS_INTERNAL_FAILURE;
+        } else if (count != factory.count) {
+            status = PALETTE_STATUS_INCOMPLETE_ROLE_SET;
+        } else {
+            for (uint8_t required = 0; required < factory.count; ++required) {
+                bool found = false;
+
+                for (uint8_t i = 0; i < count; ++i) {
+                    if (entries[i].role == factory.entries[required].role) {
+                        found = true;
+                        break;
+                    }
+                }
+
+                if (!found) {
+                    status = PALETTE_STATUS_INCOMPLETE_ROLE_SET;
+                    break;
+                }
+            }
+        }
+    }
+
+    if (status == PALETTE_STATUS_SUCCESS) {
+        ESP_LOGI(TAG,
+                 "CP palette save request: mode=%u count=%u",
+                 mode,
+                 count);
+
+        status = map_palette_result(
+            clock_palette_save_mode_override(mode, entries, count));
+
+        if (status == PALETTE_STATUS_SUCCESS) {
+            ESP_LOGI(TAG, "CP palette save ok: mode=%u", mode);
+        }
+    }
+
+    if (status != PALETTE_STATUS_SUCCESS) {
+        ESP_LOGW(TAG,
+                 "CP palette save rejected: mode=%u status=%02X",
+                 mode,
+                 status);
+    }
+
+    return build_palette_ack(tx,
+                             tx_max,
+                             board_id,
+                             'c',
+                             'p',
+                             mode,
+                             status);
+}
+
+static int handle_dp_command(const uint8_t *p,
+                             int len,
+                             uint8_t *tx,
+                             int tx_max)
+{
+    uint8_t board_id = p[3];
+    uint8_t mode = 0;
+    palette_protocol_status_t status = PALETTE_STATUS_SUCCESS;
+
+    if (board_id != 0x00 || board_id == 0x5C) {
+        ESP_LOGW(TAG, "Ignoring DP command for invalid board ID: %u", board_id);
+        return -1;
+    }
+
+    if (len < 8) {
+        status = PALETTE_STATUS_INVALID_COUNT_OR_LENGTH;
+    } else if (!decode_ascii_hex_u8(&p[6], &mode)) {
+        status = PALETTE_STATUS_INVALID_HEX;
+    } else if (!clock_palette_is_supported_mode(mode)) {
+        status = PALETTE_STATUS_UNSUPPORTED_MODE;
+    } else if (len != 9 || p[8] != '\\') {
+        status = PALETTE_STATUS_INVALID_COUNT_OR_LENGTH;
+    } else {
+        status = map_palette_result(
+            clock_palette_restore_mode_defaults(mode));
+    }
+
+    if (status == PALETTE_STATUS_SUCCESS) {
+        ESP_LOGI(TAG, "DP palette defaults restored: mode=%u", mode);
+    } else {
+        ESP_LOGW(TAG,
+                 "DP palette restore rejected: mode=%u status=%02X",
+                 mode,
+                 status);
+    }
+
+    return build_palette_ack(tx,
+                             tx_max,
+                             board_id,
+                             'd',
+                             'p',
+                             mode,
+                             status);
+}
+
+static int handle_palette_command(const uint8_t *p,
+                                  int len,
+                                  uint8_t *tx,
+                                  int tx_max)
+{
+    if (p[4] == 'L' && p[5] == 'P') {
+        return handle_lp_command(p, len, tx, tx_max);
+    }
+
+    if (p[4] == 'C' && p[5] == 'P') {
+        return handle_cp_command(p, len, tx, tx_max);
+    }
+
+    return handle_dp_command(p, len, tx, tx_max);
+}
+
 
 
 
@@ -155,6 +664,10 @@ int clock_protocol_rx_callback(const uint8_t *p,
 	        p[2] == 0x00) {
 	        ESP_LOGI(TAG, "Ethernet keep-alive / poll received");
 	        return -1;
+	    }
+
+	    if (is_palette_command(p, len)) {
+	        return handle_palette_command(p, len, tx, tx_max);
 	    }
 
 	    /*
@@ -981,5 +1494,4 @@ int clock_protocol_rx_callback(const uint8_t *p,
 		ESP_LOGW(TAG, "Unknown Ethernet command");
 		return -1;
 }
-
 

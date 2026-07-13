@@ -3,6 +3,7 @@
 
 #include "clock_logo_manager.h"
 #include "clock_menu.h"
+#include "clock_palette.h"
 #include "clock_settings.h"
 #include "driver/gpio.h"
 #include "esp_err.h"
@@ -163,4 +164,51 @@ void clock_modes_reset_sequences(void)
 uint8_t clock_modes_advance_mode(void)
 {
     return 1;
+}
+
+extern "C" bool clock_palette_is_supported_mode(uint8_t mode)
+{
+    return mode >= CLOCK_PALETTE_MODE_1 && mode <= CLOCK_PALETTE_MODE_3;
+}
+
+extern "C" bool clock_palette_is_supported_role(uint8_t mode, uint8_t role)
+{
+    (void)mode;
+    (void)role;
+    return false;
+}
+
+extern "C" bool clock_palette_get_mode_snapshot(
+    uint8_t mode,
+    clock_mode_palette_t *out_palette)
+{
+    (void)mode;
+    (void)out_palette;
+    return false;
+}
+
+extern "C" bool clock_palette_get_factory_snapshot(
+    uint8_t mode,
+    clock_mode_palette_t *out_palette)
+{
+    (void)mode;
+    (void)out_palette;
+    return false;
+}
+
+extern "C" esp_err_t clock_palette_save_mode_override(
+    uint8_t mode,
+    const clock_palette_entry_t *entries,
+    size_t count)
+{
+    (void)mode;
+    (void)entries;
+    (void)count;
+    return ESP_ERR_INVALID_STATE;
+}
+
+extern "C" esp_err_t clock_palette_restore_mode_defaults(uint8_t mode)
+{
+    (void)mode;
+    return ESP_ERR_INVALID_STATE;
 }
