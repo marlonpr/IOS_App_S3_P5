@@ -12,7 +12,7 @@ esp_err_t clock_settings_init(void);
 void clock_settings_save_format(uint8_t format);
 uint8_t clock_settings_load_format(uint8_t default_format);
 
-void clock_settings_save_mode(uint8_t mode);
+esp_err_t clock_settings_save_mode(uint8_t mode);
 uint8_t clock_settings_load_mode(uint8_t default_mode);
 
 void clock_settings_save_brightness(uint8_t brightness_level);

@@ -3,6 +3,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+#include "esp_err.h"
 #include "ds3231.h"
 #include "clock_display.h"
 
@@ -43,3 +44,4 @@ int clock_protocol_rx_callback(const uint8_t *p,
 							   
 							   
 uint8_t clock_modes_advance_mode();
+esp_err_t clock_modes_set_mode(uint8_t mode);

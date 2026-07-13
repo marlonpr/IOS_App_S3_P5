@@ -85,9 +85,10 @@ extern "C" uint8_t clock_settings_load_format(uint8_t default_format)
     return default_format;
 }
 
-extern "C" void clock_settings_save_mode(uint8_t mode)
+extern "C" esp_err_t clock_settings_save_mode(uint8_t mode)
 {
     (void)mode;
+    return ESP_OK;
 }
 
 extern "C" uint8_t clock_settings_load_mode(uint8_t default_mode)
@@ -164,6 +165,12 @@ void clock_modes_reset_sequences(void)
 uint8_t clock_modes_advance_mode(void)
 {
     return 1;
+}
+
+esp_err_t clock_modes_set_mode(uint8_t mode)
+{
+    (void)mode;
+    return ESP_OK;
 }
 
 extern "C" bool clock_palette_is_supported_mode(uint8_t mode)

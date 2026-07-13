@@ -17,6 +17,12 @@ void palette_test_set_commit_result(esp_err_t result);
 int palette_test_set_count(void);
 int palette_test_commit_count(void);
 void protocol_test_reset_alarms(void);
+void protocol_test_reset_modes(void);
+uint8_t protocol_test_display_mode(void);
+int protocol_test_mode_save_count(void);
+int protocol_test_mode_reset_count(void);
+int protocol_test_mode_advance_count(void);
+void protocol_test_set_mode_result(esp_err_t result);
 
 static int s_test_count = 0;
 static int s_brightness_level = 5;
@@ -98,6 +104,14 @@ static std::vector<uint8_t> make_lp(uint8_t mode)
 static std::vector<uint8_t> make_dp(uint8_t mode)
 {
     std::vector<uint8_t> request = make_request_prefix('D', 'P');
+    append_hex(&request, mode);
+    request.push_back('\\');
+    return request;
+}
+
+static std::vector<uint8_t> make_sm(uint8_t mode)
+{
+    std::vector<uint8_t> request = make_request_prefix('S', 'M');
     append_hex(&request, mode);
     request.push_back('\\');
     return request;
@@ -203,6 +217,7 @@ static void reset_state(void)
     palette_test_reset_counters();
     palette_test_set_commit_result(ESP_OK);
     protocol_test_reset_alarms();
+    protocol_test_reset_modes();
 
     clock_protocol_context_t context = {
         .brightness_level = &s_brightness_level,
@@ -452,6 +467,90 @@ static void test_existing_rc_and_alarm_commands(void)
     REQUIRE_EQ(da_response[5], 'a');
 }
 
+static void require_sm_response(const std::vector<uint8_t> &response,
+                                uint8_t mode,
+                                uint8_t status)
+{
+    REQUIRE_EQ(response.size(), 11u);
+    REQUIRE_EQ(response[0], '/');
+    REQUIRE_EQ(response[1], 't');
+    REQUIRE_EQ(response[2], 'a');
+    REQUIRE_EQ(response[3], 0x00);
+    REQUIRE_EQ(response[4], 's');
+    REQUIRE_EQ(response[5], 'm');
+    REQUIRE_EQ(decode_hex(&response[6]), mode);
+    REQUIRE_EQ(decode_hex(&response[8]), status);
+    REQUIRE_EQ(response[10], '\\');
+}
+
+static void test_sm_supported_modes_update_and_save(void)
+{
+    reset_state();
+
+    for (uint8_t mode = 1; mode <= 4; ++mode) {
+        require_sm_response(dispatch(make_sm(mode)), mode, 0x00);
+        REQUIRE_EQ(protocol_test_display_mode(), mode);
+        REQUIRE_EQ(protocol_test_mode_save_count(), mode);
+        REQUIRE_EQ(protocol_test_mode_reset_count(), mode);
+    }
+}
+
+static void test_sm_validation_has_no_side_effects(void)
+{
+    reset_state();
+    require_sm_response(dispatch(make_sm(5)), 5, 0x01);
+    REQUIRE_EQ(protocol_test_display_mode(), 1);
+    REQUIRE_EQ(protocol_test_mode_save_count(), 0);
+    REQUIRE_EQ(protocol_test_mode_reset_count(), 0);
+
+    std::vector<uint8_t> invalid_hex = make_sm(2);
+    invalid_hex[6] = 'G';
+    require_sm_response(dispatch(invalid_hex), 0, 0x03);
+    REQUIRE_EQ(protocol_test_display_mode(), 1);
+    REQUIRE_EQ(protocol_test_mode_save_count(), 0);
+
+    std::vector<uint8_t> invalid_length = make_sm(3);
+    invalid_length.insert(invalid_length.end() - 1, '0');
+    require_sm_response(dispatch(invalid_length), 3, 0x02);
+    REQUIRE_EQ(protocol_test_display_mode(), 1);
+    REQUIRE_EQ(protocol_test_mode_save_count(), 0);
+}
+
+static void test_sm_apply_failures_are_reported(void)
+{
+    reset_state();
+    protocol_test_set_mode_result(ESP_FAIL);
+    require_sm_response(dispatch(make_sm(2)), 2, 0x04);
+    REQUIRE_EQ(protocol_test_display_mode(), 2);
+    REQUIRE_EQ(protocol_test_mode_save_count(), 1);
+
+    reset_state();
+    protocol_test_set_mode_result(ESP_ERR_INVALID_STATE);
+    require_sm_response(dispatch(make_sm(3)), 3, 0x0A);
+    REQUIRE_EQ(protocol_test_display_mode(), 3);
+    REQUIRE_EQ(protocol_test_mode_save_count(), 1);
+}
+
+static void test_nm_behavior_and_response_are_unchanged(void)
+{
+    reset_state();
+    require_sm_response(dispatch(make_sm(3)), 3, 0x00);
+
+    std::vector<uint8_t> nm = {'/', 'T', 'A', 0, 'N', 'M', '\\'};
+    std::vector<uint8_t> response = dispatch(nm);
+    REQUIRE_EQ(response.size(), 8u);
+    REQUIRE_EQ(response[0], '/');
+    REQUIRE_EQ(response[1], 't');
+    REQUIRE_EQ(response[2], 'a');
+    REQUIRE_EQ(response[3], 0x00);
+    REQUIRE_EQ(response[4], 'n');
+    REQUIRE_EQ(response[5], 'm');
+    REQUIRE_EQ(response[6], 4);
+    REQUIRE_EQ(response[7], '\\');
+    REQUIRE_EQ(protocol_test_display_mode(), 4);
+    REQUIRE_EQ(protocol_test_mode_advance_count(), 1);
+}
+
 typedef struct {
     std::vector<std::vector<uint8_t>> frames;
     std::vector<std::vector<uint8_t>> responses;
@@ -519,6 +618,58 @@ static void test_stream_coalesced_and_multiple_frames(void)
     REQUIRE_EQ(capture.results[0], 17);
     REQUIRE_EQ(response_status(capture.responses[1]), 0x00);
     REQUIRE_EQ(response_status(capture.responses[2]), 0x00);
+}
+
+static void test_sm_stream_fragmented_and_coalesced(void)
+{
+    reset_state();
+    clock_protocol_stream_t stream = {};
+    clock_protocol_stream_init(&stream);
+    stream_capture_t capture;
+    const uint8_t first[] = {'/', 'T', 'A', 0, 'S', 'M', '0'};
+    clock_protocol_stream_result_t result =
+        clock_protocol_stream_consume(&stream,
+                                      first,
+                                      sizeof(first),
+                                      capture_frame,
+                                      &capture);
+    REQUIRE_EQ(result.frames_dispatched, 0u);
+
+    const uint8_t second[] = {'2', '\\'};
+    result = clock_protocol_stream_consume(&stream,
+                                           second,
+                                           sizeof(second),
+                                           capture_frame,
+                                           &capture);
+    REQUIRE_EQ(result.frames_dispatched, 1u);
+    require_sm_response(capture.responses[0], 2, 0x00);
+
+    std::vector<uint8_t> sm_3 = make_sm(3);
+    std::vector<uint8_t> lp_1 = make_lp(1);
+    std::vector<uint8_t> combined = sm_3;
+    combined.insert(combined.end(), lp_1.begin(), lp_1.end());
+    result = clock_protocol_stream_consume(&stream,
+                                           combined.data(),
+                                           combined.size(),
+                                           capture_frame,
+                                           &capture);
+    REQUIRE_EQ(result.frames_dispatched, 2u);
+    require_sm_response(capture.responses[1], 3, 0x00);
+    REQUIRE_EQ(response_status(capture.responses[2]), 0x00);
+
+    std::vector<uint8_t> rc = {'/', 'T', 'A', 0, 'R', 'C', '\\'};
+    std::vector<uint8_t> sm_4 = make_sm(4);
+    combined = rc;
+    combined.insert(combined.end(), sm_4.begin(), sm_4.end());
+    result = clock_protocol_stream_consume(&stream,
+                                           combined.data(),
+                                           combined.size(),
+                                           capture_frame,
+                                           &capture);
+    REQUIRE_EQ(result.frames_dispatched, 2u);
+    REQUIRE_EQ(capture.results[3], 17);
+    require_sm_response(capture.responses[4], 4, 0x00);
+    REQUIRE_EQ(protocol_test_display_mode(), 4);
 }
 
 static void test_stream_overflow_and_recovery(void)
@@ -627,8 +778,14 @@ int main(void)
     run_test(test_cp_ascii_005cff_delimiter_safety, "CP ASCII 005CFF safety");
     run_test(test_dp_restores_only_selected_mode, "DP selected mode restore");
     run_test(test_existing_rc_and_alarm_commands, "existing RC CA LA DA commands");
+    run_test(test_sm_supported_modes_update_and_save, "SM modes 1 through 4");
+    run_test(test_sm_validation_has_no_side_effects, "SM validation");
+    run_test(test_sm_apply_failures_are_reported, "SM apply failures");
+    run_test(test_nm_behavior_and_response_are_unchanged, "NM unchanged");
     run_test(test_stream_fragmentation_and_partial_wait, "stream fragmentation");
     run_test(test_stream_coalesced_and_multiple_frames, "stream coalescing");
+    run_test(test_sm_stream_fragmented_and_coalesced,
+             "SM stream fragmentation and coalescing");
     run_test(test_stream_overflow_and_recovery, "stream overflow recovery");
     run_test(test_stream_keep_alive, "stream keep-alive");
     run_test(test_stream_preserves_legacy_raw_delimiter_payload,

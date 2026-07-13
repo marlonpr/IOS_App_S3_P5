@@ -703,6 +703,45 @@ uint8_t clock_modes_advance_mode()
     return static_cast<uint8_t>(new_mode);
 }
 
+esp_err_t clock_modes_set_mode(uint8_t mode)
+{
+    if (mode < MODE_1 || mode > MODE_ROTATION) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    const display_mode_t new_mode = static_cast<display_mode_t>(mode);
+
+    portENTER_CRITICAL(&g_data_mux);
+
+    display_mode = new_mode;
+    clock_modes_reset_sequences();
+
+    portEXIT_CRITICAL(&g_data_mux);
+
+    const esp_err_t save_result =
+        clock_settings_save_mode(static_cast<uint8_t>(new_mode));
+
+    scroll_stop();
+
+    char msg[16];
+    snprintf(
+        msg,
+        sizeof(msg),
+        "MODO:%u",
+        static_cast<unsigned>(new_mode)
+    );
+
+    show_temp_message(msg, 1000);
+
+    ESP_LOGI(
+        TAG,
+        "Display mode set to %u",
+        static_cast<unsigned>(new_mode)
+    );
+
+    return save_result;
+}
+
 static void handle_normal_button(button_t btn, ds3231_dev_t *rtc)
 {
     switch (btn)

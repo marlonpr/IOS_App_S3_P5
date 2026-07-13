@@ -6,10 +6,49 @@
 #include "clock_modes.h"
 
 static ethernet_alarm_t s_alarms[MAX_ETH_ALARMS] = {};
+static uint8_t s_display_mode = 1;
+static int s_mode_save_count = 0;
+static int s_mode_reset_count = 0;
+static int s_mode_advance_count = 0;
+static esp_err_t s_mode_set_result = ESP_OK;
 
 void protocol_test_reset_alarms(void)
 {
     std::memset(s_alarms, 0, sizeof(s_alarms));
+}
+
+void protocol_test_reset_modes(void)
+{
+    s_display_mode = 1;
+    s_mode_save_count = 0;
+    s_mode_reset_count = 0;
+    s_mode_advance_count = 0;
+    s_mode_set_result = ESP_OK;
+}
+
+uint8_t protocol_test_display_mode(void)
+{
+    return s_display_mode;
+}
+
+int protocol_test_mode_save_count(void)
+{
+    return s_mode_save_count;
+}
+
+int protocol_test_mode_reset_count(void)
+{
+    return s_mode_reset_count;
+}
+
+int protocol_test_mode_advance_count(void)
+{
+    return s_mode_advance_count;
+}
+
+void protocol_test_set_mode_result(esp_err_t result)
+{
+    s_mode_set_result = result;
 }
 
 void clock_alarm_arm_full_replacement(void)
@@ -87,9 +126,26 @@ extern "C" clock_logo_restore_result_t clock_logo_restore_compiled_default(void)
 
 void clock_modes_reset_sequences(void)
 {
+    s_mode_reset_count++;
 }
 
 uint8_t clock_modes_advance_mode(void)
 {
-    return 1;
+    s_mode_advance_count++;
+    s_display_mode = s_display_mode >= 4 ? 1 : s_display_mode + 1;
+    s_mode_save_count++;
+    clock_modes_reset_sequences();
+    return s_display_mode;
+}
+
+esp_err_t clock_modes_set_mode(uint8_t mode)
+{
+    if (mode < 1 || mode > 4) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    s_display_mode = mode;
+    s_mode_save_count++;
+    clock_modes_reset_sequences();
+    return s_mode_set_result;
 }

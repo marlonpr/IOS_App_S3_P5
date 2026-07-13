@@ -142,6 +142,15 @@ typedef enum {
     PALETTE_STATUS_INTERNAL_FAILURE = 0x0A,
 } palette_protocol_status_t;
 
+typedef enum {
+    SET_MODE_STATUS_SUCCESS = 0x00,
+    SET_MODE_STATUS_UNSUPPORTED_MODE = 0x01,
+    SET_MODE_STATUS_INVALID_LENGTH = 0x02,
+    SET_MODE_STATUS_INVALID_HEX = 0x03,
+    SET_MODE_STATUS_NVS_FAILURE = 0x04,
+    SET_MODE_STATUS_INTERNAL_FAILURE = 0x0A,
+} set_mode_protocol_status_t;
+
 static int ascii_hex_nibble(uint8_t value)
 {
     if (value >= '0' && value <= '9') {
@@ -182,6 +191,106 @@ static void encode_ascii_hex_u8(uint8_t value, uint8_t *output)
 
     output[0] = (uint8_t)kHexDigits[value >> 4];
     output[1] = (uint8_t)kHexDigits[value & 0x0F];
+}
+
+static bool is_set_mode_command(const uint8_t *p, int len)
+{
+    return p != nullptr && len >= 6 &&
+           p[0] == '/' && p[1] == 'T' && p[2] == 'A' &&
+           p[4] == 'S' && p[5] == 'M';
+}
+
+static int build_set_mode_response(uint8_t *tx,
+                                   int tx_max,
+                                   uint8_t board_id,
+                                   uint8_t mode,
+                                   set_mode_protocol_status_t status)
+{
+    static constexpr size_t kResponseLength = 11;
+
+    if (tx == nullptr || tx_max < 0 ||
+        (size_t)tx_max < kResponseLength) {
+        ESP_LOGE(TAG, "TX buffer too small for SM response");
+        return -1;
+    }
+
+    tx[0] = '/';
+    tx[1] = 't';
+    tx[2] = 'a';
+    tx[3] = board_id;
+    tx[4] = 's';
+    tx[5] = 'm';
+    encode_ascii_hex_u8(mode, &tx[6]);
+    encode_ascii_hex_u8((uint8_t)status, &tx[8]);
+    tx[10] = '\\';
+    return (int)kResponseLength;
+}
+
+static set_mode_protocol_status_t map_set_mode_result(esp_err_t result)
+{
+    if (result == ESP_OK) {
+        return SET_MODE_STATUS_SUCCESS;
+    }
+
+    if (result == ESP_ERR_INVALID_ARG ||
+        result == ESP_ERR_INVALID_STATE) {
+        return SET_MODE_STATUS_INTERNAL_FAILURE;
+    }
+
+    return SET_MODE_STATUS_NVS_FAILURE;
+}
+
+static int handle_set_mode_command(const uint8_t *p,
+                                   int len,
+                                   uint8_t *tx,
+                                   int tx_max)
+{
+    const uint8_t board_id = p[3];
+    uint8_t mode = 0;
+
+    if (board_id != 0x00 || board_id == 0x5C) {
+        ESP_LOGW(TAG,
+                 "Ignoring SM command for invalid board ID: %u",
+                 board_id);
+        return -1;
+    }
+
+    if (tx == nullptr || tx_max < 11) {
+        ESP_LOGE(TAG, "TX buffer too small for SM response");
+        return -1;
+    }
+
+    const bool mode_is_parseable =
+        len >= 8 && decode_ascii_hex_u8(&p[6], &mode);
+    set_mode_protocol_status_t status = SET_MODE_STATUS_SUCCESS;
+
+    if (len != 9 || p[8] != '\\') {
+        status = SET_MODE_STATUS_INVALID_LENGTH;
+    } else if (!mode_is_parseable) {
+        status = SET_MODE_STATUS_INVALID_HEX;
+    } else if (mode < MODE_1 || mode > MODE_ROTATION) {
+        status = SET_MODE_STATUS_UNSUPPORTED_MODE;
+    }
+
+    if (status == SET_MODE_STATUS_SUCCESS) {
+        ESP_LOGI(TAG, "SM set mode request: mode=%u", mode);
+        status = map_set_mode_result(clock_modes_set_mode(mode));
+    }
+
+    if (status == SET_MODE_STATUS_SUCCESS) {
+        ESP_LOGI(TAG, "SM set mode applied: mode=%u", mode);
+    } else {
+        ESP_LOGW(TAG,
+                 "SM set mode rejected: mode=%u status=%02X",
+                 mode,
+                 status);
+    }
+
+    return build_set_mode_response(tx,
+                                   tx_max,
+                                   board_id,
+                                   mode,
+                                   status);
 }
 
 static bool palette_tx_has_capacity(uint8_t *tx,
@@ -668,6 +777,10 @@ int clock_protocol_rx_callback(const uint8_t *p,
 
 	    if (is_palette_command(p, len)) {
 	        return handle_palette_command(p, len, tx, tx_max);
+	    }
+
+	    if (is_set_mode_command(p, len)) {
+	        return handle_set_mode_command(p, len, tx, tx_max);
 	    }
 
 	    /*
@@ -1494,4 +1607,3 @@ int clock_protocol_rx_callback(const uint8_t *p,
 		ESP_LOGW(TAG, "Unknown Ethernet command");
 		return -1;
 }
-

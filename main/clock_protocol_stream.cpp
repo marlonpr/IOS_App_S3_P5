@@ -51,6 +51,10 @@ static size_t fixed_frame_length(const clock_protocol_stream_t *stream)
         return 9;
     }
 
+    if (command_1 == 'S' && command_2 == 'M') {
+        return 9;
+    }
+
     return 0;
 }
 
