@@ -4,7 +4,7 @@
 
 #ifndef CLOCK_OTA_VERSION_JSON_URL
 #define CLOCK_OTA_VERSION_JSON_URL \
-    "https://github.com/marlonpr/IOS_App_S3_P5/releases/latest/download/version.json"
+    	"http://192.168.5.115:8000/version.json"			//"https://github.com/marlonpr/IOS_App_S3_P5/releases/latest/download/version.json"
 #endif
 
 #ifdef __cplusplus
