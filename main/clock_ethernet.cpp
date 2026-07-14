@@ -28,6 +28,7 @@
 #include "driver/gpio.h"
 
 #include "clock_mdns.h"
+#include "clock_ota.h"
 #include "clock_protocol_stream.h"
 #include "logo_upload_server.h"
 
@@ -107,6 +108,28 @@ static void got_ip_event_handler(
     ESP_LOGI(TAG, "ETHMASK: " IPSTR, IP2STR(&ip_info->netmask));
     ESP_LOGI(TAG, "ETHGW: " IPSTR, IP2STR(&ip_info->gw));
 
+    bool ota_network_ready = ip_info->ip.addr != 0 && ip_info->gw.addr != 0;
+
+    if (!ota_network_ready) {
+        ESP_LOGW(TAG,
+                 "Ethernet IP or gateway is not ready; deferring OTA startup check");
+    }
+
+    esp_netif_dns_info_t dns_info = {};
+    esp_err_t dns_err = esp_netif_get_dns_info(s_eth_netif,
+                                                ESP_NETIF_DNS_MAIN,
+                                                &dns_info);
+
+    if (dns_err != ESP_OK || ESP_IP_IS_ANY(dns_info.ip)) {
+        ota_network_ready = false;
+        ESP_LOGW(TAG,
+                 "Ethernet DNS is not ready; deferring OTA startup check");
+    } else if (dns_info.ip.type == ESP_IPADDR_TYPE_V4) {
+        ESP_LOGI(TAG,
+                 "ETHDNS: " IPSTR,
+                 IP2STR(&dns_info.ip.u_addr.ip4));
+    }
+
     constexpr uint8_t board_id = 0;
 
     esp_err_t mdns_err =
@@ -118,6 +141,15 @@ static void got_ip_event_handler(
             "Failed to start mDNS: %s",
             esp_err_to_name(mdns_err)
         );
+    }
+
+    if (ota_network_ready) {
+        esp_err_t ota_start_err = clock_ota_start_github_check_once();
+        if (ota_start_err != ESP_OK && ota_start_err != ESP_ERR_INVALID_STATE) {
+            ESP_LOGE(TAG,
+                     "Failed to launch startup OTA check: %s",
+                     esp_err_to_name(ota_start_err));
+        }
     }
 
     ESP_LOGI(TAG, "Network ready; starting logo upload server");

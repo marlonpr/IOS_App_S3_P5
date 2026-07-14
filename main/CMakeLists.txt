@@ -13,19 +13,26 @@ idf_component_register(
     "clock_sd_card.cpp"
     "clock_logo_manager.cpp"
     "clock_palette.cpp"
+    "clock_ota.cpp"
+    "clock_ota_core.cpp"
     "logo_upload_server.cpp"
     INCLUDE_DIRS "."
-    REQUIRES led_panel 
-    	DS3231 
-    	DS18B20 
-    	nvs_flash 
-    	esp_event 
-    	esp_netif 
-    	esp_eth 
-    	driver 
-    	lwip 
-    	espressif__w5500
-    	esp_app_format
+    REQUIRES led_panel
+        DS3231
+        DS18B20
+        nvs_flash
+        esp_event
+        esp_netif
+        esp_eth
+        driver
+        lwip
+        espressif__w5500
+        esp_app_format
+        esp_http_client
+        esp_https_ota
+        esp-tls
+        app_update
+        mbedtls
         mdns
         fatfs
         sdmmc

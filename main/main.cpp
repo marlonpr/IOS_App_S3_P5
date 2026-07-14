@@ -21,6 +21,7 @@
 #include "clock_sd_card.h"
 #include "clock_logo_manager.h"
 #include "clock_palette.h"
+#include "clock_ota.h"
 
 #include "clock_mdns.h"
 
@@ -1039,6 +1040,9 @@ static void check_or_set_default_rtc(ds3231_dev_t *rtc)
 
 extern "C" void app_main(void)
 {
+	clock_ota_print_app_info();
+	clock_ota_confirm_app_if_needed();
+
 	clock_logo_init();
 
 	esp_err_t sd_err = clock_sd_card_init();
