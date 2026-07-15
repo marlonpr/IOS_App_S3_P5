@@ -98,6 +98,59 @@ void test_labels()
                  "WIFI CONNECTED");
     REQUIRE_TEXT(clock_network_result_message(CLOCK_NETWORK_INTERFACE_NONE),
                  "NET NOT CONNECTED");
+    REQUIRE(clock_network_is_result_message("ETH CONNECTED"));
+    REQUIRE(clock_network_is_result_message("WIFI CONNECTED"));
+    REQUIRE(clock_network_is_result_message("NET NOT CONNECTED"));
+    REQUIRE(!clock_network_is_result_message("TRY WIFI"));
+    REQUIRE(!clock_network_is_result_message("REBOOT TO APPLY"));
+}
+
+void require_result_waits_for_startup(clock_network_interface_t interface)
+{
+    clock_network_result_gate_t gate = {};
+    clock_network_result_gate_init(&gate);
+
+    const char *expected = clock_network_result_message(interface);
+    REQUIRE(!clock_network_result_gate_submit(&gate, expected, 3000));
+
+    char released[CLOCK_NETWORK_RESULT_MESSAGE_CAPACITY] = {};
+    uint32_t duration_ms = 0;
+    REQUIRE(clock_network_result_gate_finish_startup(&gate,
+                                                     released,
+                                                     sizeof(released),
+                                                     &duration_ms));
+    REQUIRE_TEXT(released, expected);
+    REQUIRE_EQ(duration_ms, 3000U);
+}
+
+void test_network_results_wait_for_startup()
+{
+    require_result_waits_for_startup(CLOCK_NETWORK_INTERFACE_ETHERNET);
+    require_result_waits_for_startup(CLOCK_NETWORK_INTERFACE_WIFI);
+    require_result_waits_for_startup(CLOCK_NETWORK_INTERFACE_NONE);
+}
+
+void test_result_is_immediate_after_startup()
+{
+    clock_network_result_gate_t gate = {};
+    clock_network_result_gate_init(&gate);
+
+    char released[CLOCK_NETWORK_RESULT_MESSAGE_CAPACITY] = {};
+    uint32_t duration_ms = 0;
+    REQUIRE(!clock_network_result_gate_finish_startup(&gate,
+                                                      released,
+                                                      sizeof(released),
+                                                      &duration_ms));
+    REQUIRE(clock_network_result_gate_submit(&gate, "WIFI CONNECTED", 3000));
+}
+
+void test_non_result_messages_are_never_delayed()
+{
+    clock_network_result_gate_t gate = {};
+    clock_network_result_gate_init(&gate);
+
+    REQUIRE(clock_network_result_gate_submit(&gate, "TRY WIFI", 1500));
+    REQUIRE(clock_network_result_gate_submit(&gate, "REBOOT TO APPLY", 2500));
 }
 
 void test_boot_order()
@@ -168,6 +221,9 @@ int main()
     test_nvs_defaults_and_values();
     test_saved_mode_cycle_has_no_live_interface_side_effect();
     test_labels();
+    test_network_results_wait_for_startup();
+    test_result_is_immediate_after_startup();
+    test_non_result_messages_are_never_delayed();
     test_boot_order();
     test_long_hold_fires_once_per_hold();
     test_services_and_ota_start_once_after_ip();

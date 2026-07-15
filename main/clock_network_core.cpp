@@ -1,5 +1,8 @@
 #include "clock_network.h"
 
+#include <stdio.h>
+#include <string.h>
+
 bool clock_network_mode_is_valid(uint8_t mode)
 {
     return mode <= CLOCK_NETWORK_MODE_WIFI;
@@ -55,6 +58,73 @@ const char *clock_network_result_message(clock_network_interface_t interface)
         default:
             return "NET NOT CONNECTED";
     }
+}
+
+bool clock_network_is_result_message(const char *message)
+{
+    if (message == nullptr) {
+        return false;
+    }
+
+    return strcmp(message, "ETH CONNECTED") == 0 ||
+           strcmp(message, "WIFI CONNECTED") == 0 ||
+           strcmp(message, "NET NOT CONNECTED") == 0;
+}
+
+void clock_network_result_gate_init(clock_network_result_gate_t *gate)
+{
+    if (gate == nullptr) {
+        return;
+    }
+
+    gate->startup_complete = false;
+    gate->result_pending = false;
+    gate->pending_message[0] = '\0';
+    gate->pending_duration_ms = 0;
+}
+
+bool clock_network_result_gate_submit(clock_network_result_gate_t *gate,
+                                      const char *message,
+                                      uint32_t duration_ms)
+{
+    if (gate == nullptr || !clock_network_is_result_message(message)) {
+        return true;
+    }
+
+    if (gate->startup_complete) {
+        return true;
+    }
+
+    snprintf(gate->pending_message,
+             sizeof(gate->pending_message),
+             "%s",
+             message);
+    gate->pending_duration_ms = duration_ms;
+    gate->result_pending = true;
+    return false;
+}
+
+bool clock_network_result_gate_finish_startup(
+    clock_network_result_gate_t *gate,
+    char *message,
+    size_t message_capacity,
+    uint32_t *duration_ms)
+{
+    if (gate == nullptr) {
+        return false;
+    }
+
+    gate->startup_complete = true;
+
+    if (!gate->result_pending || message == nullptr || message_capacity == 0 ||
+        duration_ms == nullptr) {
+        return false;
+    }
+
+    snprintf(message, message_capacity, "%s", gate->pending_message);
+    *duration_ms = gate->pending_duration_ms;
+    gate->result_pending = false;
+    return true;
 }
 
 clock_network_interface_t clock_network_first_interface(clock_network_mode_t mode)

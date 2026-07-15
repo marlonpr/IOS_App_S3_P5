@@ -51,7 +51,7 @@ static Hub75Config config = make_config();
 static Hub75Driver driver(config);
 
 //================================ GLOBALS =======================================
-static bool g_startup_screen_active = true;
+static bool g_startup_screen_active = false;
 static int64_t g_startup_screen_until_us = 0;
 
 static bool g_logo_screen_active = true;
@@ -65,6 +65,7 @@ static int64_t g_message_until_us = 0;
 static char g_next_message[32] = {0};
 static bool g_next_message_pending = false;
 static uint32_t g_next_message_duration_ms = 0;
+static clock_network_result_gate_t g_network_result_gate = {};
 
 
 static int brightness_level = 5;        // 1 to 10
@@ -146,6 +147,14 @@ static display_mode_t display_mode = MODE_1;
 static clock_network_mode_t g_saved_network_mode = CLOCK_NETWORK_MODE_AUTO;
 
 
+static void set_temp_message_locked(const char *msg, uint32_t duration_ms)
+{
+    snprintf(g_message, sizeof(g_message), "%s", msg);
+    g_message_active = true;
+    g_message_until_us = esp_timer_get_time() + ((int64_t)duration_ms * 1000);
+    g_next_message_pending = false;
+}
+
 static void show_temp_message(const char *msg, uint32_t duration_ms)
 {
     if (!msg) {
@@ -153,11 +162,23 @@ static void show_temp_message(const char *msg, uint32_t duration_ms)
     }
 
     portENTER_CRITICAL(&g_data_mux);
+    set_temp_message_locked(msg, duration_ms);
+    portEXIT_CRITICAL(&g_data_mux);
+}
 
-    snprintf(g_message, sizeof(g_message), "%s", msg);
-    g_message_active = true;
-    g_message_until_us = esp_timer_get_time() + ((int64_t)duration_ms * 1000);
-    g_next_message_pending = false;
+static void show_network_status_message(const char *msg, uint32_t duration_ms)
+{
+    if (!msg) {
+        return;
+    }
+
+    portENTER_CRITICAL(&g_data_mux);
+
+    if (clock_network_result_gate_submit(&g_network_result_gate,
+                                         msg,
+                                         duration_ms)) {
+        set_temp_message_locked(msg, duration_ms);
+    }
 
     portEXIT_CRITICAL(&g_data_mux);
 }
@@ -407,6 +428,17 @@ void display_update_task(void* pvParameters)
 		if (g_startup_screen_active && esp_timer_get_time() > g_startup_screen_until_us) {
 		    g_startup_screen_active = false;
 		    startup_screen_active_copy = false;
+
+		    char pending_network_result[CLOCK_NETWORK_RESULT_MESSAGE_CAPACITY];
+		    uint32_t pending_network_result_duration_ms = 0;
+		    if (clock_network_result_gate_finish_startup(
+		            &g_network_result_gate,
+		            pending_network_result,
+		            sizeof(pending_network_result),
+		            &pending_network_result_duration_ms)) {
+		        set_temp_message_locked(pending_network_result,
+		                                pending_network_result_duration_ms);
+		    }
 		}
 
 		if (g_message_active && esp_timer_get_time() > g_message_until_us) {
@@ -1192,6 +1224,8 @@ static void check_or_set_default_rtc(ds3231_dev_t *rtc)
 
 extern "C" void app_main(void)
 {
+	clock_network_result_gate_init(&g_network_result_gate);
+
 	clock_ota_print_app_info();
 	clock_ota_confirm_app_if_needed();
 
@@ -1349,11 +1383,11 @@ extern "C" void app_main(void)
 	const esp_err_t network_start_result = clock_network_start(
 	    g_saved_network_mode,
 	    clock_protocol_rx_callback,
-	    show_temp_message);
+	    show_network_status_message);
 	if (network_start_result != ESP_OK) {
 	    ESP_LOGE(TAG,
 	             "Failed to start network boot coordinator: %s",
 	             esp_err_to_name(network_start_result));
-	    show_temp_message("NET NOT CONNECTED", 3000);
+	    show_network_status_message("NET NOT CONNECTED", 3000);
 	}
 }

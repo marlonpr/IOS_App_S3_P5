@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #include "esp_err.h"
@@ -30,6 +31,15 @@ typedef struct {
     bool fired;
 } clock_network_long_hold_t;
 
+#define CLOCK_NETWORK_RESULT_MESSAGE_CAPACITY 32
+
+typedef struct {
+    bool startup_complete;
+    bool result_pending;
+    char pending_message[CLOCK_NETWORK_RESULT_MESSAGE_CAPACITY];
+    uint32_t pending_duration_ms;
+} clock_network_result_gate_t;
+
 typedef esp_err_t (*clock_network_save_mode_callback_t)(uint8_t mode,
                                                          void *context);
 typedef void (*clock_network_show_message_callback_t)(const char *message,
@@ -40,6 +50,17 @@ clock_network_mode_t clock_network_next_mode(clock_network_mode_t mode);
 const char *clock_network_mode_label(clock_network_mode_t mode);
 const char *clock_network_mode_panel_label(clock_network_mode_t mode);
 const char *clock_network_result_message(clock_network_interface_t interface);
+bool clock_network_is_result_message(const char *message);
+
+void clock_network_result_gate_init(clock_network_result_gate_t *gate);
+bool clock_network_result_gate_submit(clock_network_result_gate_t *gate,
+                                      const char *message,
+                                      uint32_t duration_ms);
+bool clock_network_result_gate_finish_startup(
+    clock_network_result_gate_t *gate,
+    char *message,
+    size_t message_capacity,
+    uint32_t *duration_ms);
 
 clock_network_interface_t clock_network_first_interface(clock_network_mode_t mode);
 clock_network_interface_t clock_network_fallback_interface(
