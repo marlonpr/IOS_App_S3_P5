@@ -752,7 +752,8 @@ void clock_display_draw_logo(Hub75Driver *driver)
 void clock_display_draw_startup(Hub75Driver *driver,
                                 int display_mode,
                                 int brightness_level,
-                                hour_format_t format)
+                                hour_format_t format,
+                                const char *network_mode_label)
 {
     if (!driver) {
         return;
@@ -761,15 +762,19 @@ void clock_display_draw_startup(Hub75Driver *driver,
     char line1[16];
     char line2[16];
     char line3[16];
+    char line4[16];
 
     snprintf(line1, sizeof(line1), "MODO:%d", display_mode);
     snprintf(line2, sizeof(line2), "BRILLO:%d", brightness_level);
     snprintf(line3, sizeof(line3), "%s",
              format == FORMAT_24H ? "24HRS:ON" : "24HRS:OFF");
+    snprintf(line4, sizeof(line4), "%s",
+             network_mode_label != nullptr ? network_mode_label : "NET: AUTO");
 
-    draw_string_5x7(*driver, clock_display_center_x_5x7(line1), 1,  line1, 255, 0, 0);
-    draw_string_5x7(*driver, clock_display_center_x_5x7(line2), 11, line2, 0, 255, 0);
-    draw_string_5x7(*driver, clock_display_center_x_5x7(line3), 22, line3, 0, 255, 255);
+    draw_string_5x7(*driver, clock_display_center_x_5x7(line1), 0,  line1, 255, 0, 0);
+    draw_string_5x7(*driver, clock_display_center_x_5x7(line2), 8,  line2, 0, 255, 0);
+    draw_string_5x7(*driver, clock_display_center_x_5x7(line3), 16, line3, 0, 255, 255);
+    draw_string_5x7(*driver, clock_display_center_x_5x7(line4), 24, line4, 255, 255, 0);
 }
 
 

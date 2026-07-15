@@ -647,7 +647,7 @@ CONFIG_IDF_TARGET_ARCH="xtensa"
 # default:
 CONFIG_IDF_TARGET="esp32s3"
 # default:
-CONFIG_IDF_INIT_VERSION="6.0.0"
+CONFIG_IDF_INIT_VERSION="6.0.1"
 # default:
 CONFIG_IDF_TARGET_ESP32S3=y
 # default:
@@ -974,13 +974,19 @@ CONFIG_PARTITION_TABLE_MD5=y
 # end of Partition Table
 
 #
-# Example Configuration
+# Clock Network Configuration
 #
+CONFIG_ESP_WIFI_SSID="FilsemWifi"
+CONFIG_ESP_WIFI_PASSWORD="MasterTI24$"
 # default:
-CONFIG_ESP_WIFI_SSID="myssid"
+CONFIG_CLOCK_NETWORK_AUTO_ETH_TIMEOUT_MS=9000
 # default:
-CONFIG_ESP_WIFI_PASSWORD="mypassword"
-# end of Example Configuration
+CONFIG_CLOCK_NETWORK_ETH_TIMEOUT_MS=15000
+# default:
+CONFIG_CLOCK_NETWORK_AUTO_WIFI_TIMEOUT_MS=18000
+# default:
+CONFIG_CLOCK_NETWORK_WIFI_TIMEOUT_MS=20000
+# end of Clock Network Configuration
 
 #
 # Compiler options

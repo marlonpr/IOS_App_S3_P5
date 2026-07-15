@@ -4,6 +4,7 @@
 #include <errno.h>
 
 #include "freertos/FreeRTOS.h"
+#include "freertos/event_groups.h"
 #include "freertos/task.h"
 
 #include "esp_log.h"
@@ -27,10 +28,7 @@
 
 #include "driver/gpio.h"
 
-#include "clock_mdns.h"
-#include "clock_ota.h"
 #include "clock_protocol_stream.h"
-#include "logo_upload_server.h"
 
 static const char *TAG = "CLOCK_ETHERNET";
 
@@ -51,11 +49,24 @@ static const char *TAG = "CLOCK_ETHERNET";
 
 #define TCP_SERVER_PORT    5000
 
+static constexpr EventBits_t ETH_GOT_IP_BIT = BIT0;
+
 static esp_eth_handle_t s_eth_handle = NULL;
 static esp_netif_t *s_eth_netif = NULL;
+static EventGroupHandle_t s_eth_events = NULL;
 
 static bool s_use_static_ip = true;
 static clock_ethernet_rx_callback_t s_rx_callback = NULL;
+
+#define CLOCK_ETH_RETURN_ON_ERROR(expression)                              \
+    do {                                                                   \
+        const esp_err_t operation_result = (expression);                   \
+        if (operation_result != ESP_OK) {                                  \
+            ESP_LOGE(TAG, "%s failed: %s", #expression,                  \
+                     esp_err_to_name(operation_result));                   \
+            return operation_result;                                      \
+        }                                                                  \
+    } while (0)
 
 // ================= EVENTS =================
 
@@ -71,6 +82,9 @@ static void eth_event_handler(void *arg,
 
         case ETHERNET_EVENT_DISCONNECTED:
             ESP_LOGW(TAG, "Ethernet Link Down");
+            if (s_eth_events != NULL) {
+                xEventGroupClearBits(s_eth_events, ETH_GOT_IP_BIT);
+            }
             break;
 
         case ETHERNET_EVENT_START:
@@ -79,6 +93,9 @@ static void eth_event_handler(void *arg,
 
         case ETHERNET_EVENT_STOP:
             ESP_LOGI(TAG, "Ethernet Stopped");
+            if (s_eth_events != NULL) {
+                xEventGroupClearBits(s_eth_events, ETH_GOT_IP_BIT);
+            }
             break;
 
         default:
@@ -108,70 +125,23 @@ static void got_ip_event_handler(
     ESP_LOGI(TAG, "ETHMASK: " IPSTR, IP2STR(&ip_info->netmask));
     ESP_LOGI(TAG, "ETHGW: " IPSTR, IP2STR(&ip_info->gw));
 
-    bool ota_network_ready = ip_info->ip.addr != 0 && ip_info->gw.addr != 0;
-
-    if (!ota_network_ready) {
-        ESP_LOGW(TAG,
-                 "Ethernet IP or gateway is not ready; deferring OTA startup check");
-    }
-
     esp_netif_dns_info_t dns_info = {};
     esp_err_t dns_err = esp_netif_get_dns_info(s_eth_netif,
                                                 ESP_NETIF_DNS_MAIN,
                                                 &dns_info);
 
-    if (dns_err != ESP_OK || ESP_IP_IS_ANY(dns_info.ip)) {
-        ota_network_ready = false;
-        ESP_LOGW(TAG,
-                 "Ethernet DNS is not ready; deferring OTA startup check");
+    if (dns_err != ESP_OK ||
+        dns_info.ip.type != ESP_IPADDR_TYPE_V4 ||
+        dns_info.ip.u_addr.ip4.addr == 0) {
+        ESP_LOGW(TAG, "Ethernet DNS is not ready");
     } else if (dns_info.ip.type == ESP_IPADDR_TYPE_V4) {
         ESP_LOGI(TAG,
                  "ETHDNS: " IPSTR,
                  IP2STR(&dns_info.ip.u_addr.ip4));
     }
 
-    constexpr uint8_t board_id = 0;
-
-    esp_err_t mdns_err =
-        clock_mdns_start(board_id);
-
-    if (mdns_err != ESP_OK) {
-        ESP_LOGE(
-            TAG,
-            "Failed to start mDNS: %s",
-            esp_err_to_name(mdns_err)
-        );
-    }
-
-    if (ota_network_ready) {
-        esp_err_t ota_start_err = clock_ota_start_github_check_once();
-        if (ota_start_err != ESP_OK && ota_start_err != ESP_ERR_INVALID_STATE) {
-            ESP_LOGE(TAG,
-                     "Failed to launch startup OTA check: %s",
-                     esp_err_to_name(ota_start_err));
-        }
-    }
-
-    ESP_LOGI(TAG, "Network ready; starting logo upload server");
-
-    esp_err_t upload_start_err = logo_upload_server_start();
-
-    if (upload_start_err != ESP_OK) {
-        ESP_LOGE(
-            TAG,
-            "Failed to start logo upload server: %s",
-            esp_err_to_name(upload_start_err)
-        );
-        return;
-    }
-
-    esp_err_t upload_mdns_err =
-        logo_upload_server_register_mdns_service(board_id);
-
-    if (upload_mdns_err != ESP_OK) {
-        ESP_LOGW(TAG,
-                 "Logo upload mDNS service not available: %s",
-                 esp_err_to_name(upload_mdns_err));
+    if (s_eth_events != NULL && ip_info->ip.addr != 0) {
+        xEventGroupSetBits(s_eth_events, ETH_GOT_IP_BIT);
     }
 }
 
@@ -449,14 +419,21 @@ static esp_err_t clock_ethernet_init_common(bool use_static_ip)
              ETH_SCLK_GPIO,
              ETH_CS_GPIO);
 
-	esp_err_t isr_ret = gpio_install_isr_service(0);
+/*
+esp_err_t isr_ret = gpio_install_isr_service(0);
 
-	if (isr_ret != ESP_OK && isr_ret != ESP_ERR_INVALID_STATE) {
-	    ESP_LOGE(TAG, "Failed to install GPIO ISR service: %s", esp_err_to_name(isr_ret));
-	    return isr_ret;
-	}
+if (isr_ret != ESP_OK && isr_ret != ESP_ERR_INVALID_STATE) {
+    ESP_LOGE(TAG, "Failed to install GPIO ISR service: %s", esp_err_to_name(isr_ret));
+    return isr_ret;
+}
+*/
 
-    ESP_ERROR_CHECK(esp_netif_init());
+    esp_err_t netif_ret = esp_netif_init();
+    if (netif_ret != ESP_OK && netif_ret != ESP_ERR_INVALID_STATE) {
+        ESP_LOGE(TAG, "esp_netif_init failed: %s",
+                 esp_err_to_name(netif_ret));
+        return netif_ret;
+    }
 
     esp_err_t event_ret = esp_event_loop_create_default();
     if (event_ret != ESP_OK && event_ret != ESP_ERR_INVALID_STATE) {
@@ -464,6 +441,15 @@ static esp_err_t clock_ethernet_init_common(bool use_static_ip)
                  esp_err_to_name(event_ret));
         return event_ret;
     }
+
+    if (s_eth_events == NULL) {
+        s_eth_events = xEventGroupCreate();
+        if (s_eth_events == NULL) {
+            ESP_LOGE(TAG, "Failed to create Ethernet event group");
+            return ESP_ERR_NO_MEM;
+        }
+    }
+    xEventGroupClearBits(s_eth_events, ETH_GOT_IP_BIT);
 
     esp_netif_config_t netif_cfg = ESP_NETIF_DEFAULT_ETH();
     s_eth_netif = esp_netif_new(&netif_cfg);
@@ -479,7 +465,8 @@ static esp_err_t clock_ethernet_init_common(bool use_static_ip)
     buscfg.quadwp_io_num = -1;
     buscfg.quadhd_io_num = -1;
 
-    ESP_ERROR_CHECK(spi_bus_initialize(ETH_SPI_HOST, &buscfg, SPI_DMA_CH_AUTO));
+    CLOCK_ETH_RETURN_ON_ERROR(
+        spi_bus_initialize(ETH_SPI_HOST, &buscfg, SPI_DMA_CH_AUTO));
 
     spi_device_interface_config_t devcfg = {};
     devcfg.command_bits = 16;
@@ -503,22 +490,28 @@ static esp_err_t clock_ethernet_init_common(bool use_static_ip)
     esp_eth_mac_t *mac = esp_eth_mac_new_w5500(&w5500_config, &mac_config);
     esp_eth_phy_t *phy = esp_eth_phy_new_w5500(&phy_config);
 
+    if (mac == NULL || phy == NULL) {
+        ESP_LOGE(TAG, "Failed to allocate W5500 MAC/PHY");
+        return ESP_ERR_NO_MEM;
+    }
+
     esp_eth_config_t eth_config = ETH_DEFAULT_CONFIG(mac, phy);
 
-    ESP_ERROR_CHECK(esp_eth_driver_install(&eth_config, &s_eth_handle));
+    CLOCK_ETH_RETURN_ON_ERROR(
+        esp_eth_driver_install(&eth_config, &s_eth_handle));
 
     uint8_t mac_addr[6] = {0};
 
-    ESP_ERROR_CHECK(esp_read_mac(mac_addr, ESP_MAC_WIFI_STA));
+    CLOCK_ETH_RETURN_ON_ERROR(esp_read_mac(mac_addr, ESP_MAC_WIFI_STA));
 
     /*
      * Local administered unicast MAC for Ethernet.
      */
     mac_addr[0] = (mac_addr[0] & 0xFE) | 0x02;
 
-    ESP_ERROR_CHECK(esp_eth_ioctl(s_eth_handle,
-                                  ETH_CMD_S_MAC_ADDR,
-                                  mac_addr));
+    CLOCK_ETH_RETURN_ON_ERROR(esp_eth_ioctl(s_eth_handle,
+                                            ETH_CMD_S_MAC_ADDR,
+                                            mac_addr));
 
     ESP_LOGI(TAG,
              "W5500 MAC: %02X:%02X:%02X:%02X:%02X:%02X",
@@ -529,11 +522,15 @@ static esp_err_t clock_ethernet_init_common(bool use_static_ip)
              mac_addr[4],
              mac_addr[5]);
 
-    ESP_ERROR_CHECK(esp_netif_attach(s_eth_netif,
-                                     esp_eth_new_netif_glue(s_eth_handle)));
+    esp_eth_netif_glue_handle_t glue = esp_eth_new_netif_glue(s_eth_handle);
+    if (glue == NULL) {
+        ESP_LOGE(TAG, "Failed to create W5500 netif glue");
+        return ESP_ERR_NO_MEM;
+    }
+    CLOCK_ETH_RETURN_ON_ERROR(esp_netif_attach(s_eth_netif, glue));
 
     if (s_use_static_ip) {
-        ESP_ERROR_CHECK(esp_netif_dhcpc_stop(s_eth_netif));
+        CLOCK_ETH_RETURN_ON_ERROR(esp_netif_dhcpc_stop(s_eth_netif));
 
         esp_netif_ip_info_t ip_info = {};
 
@@ -544,22 +541,23 @@ static esp_err_t clock_ethernet_init_common(bool use_static_ip)
         //ip_info.gw.addr      = ESP_IP4TOADDR(192, 168, 10, 1);
 		ip_info.gw.addr      = ESP_IP4TOADDR(192, 168, 137, 1);
 
-        ESP_ERROR_CHECK(esp_netif_set_ip_info(s_eth_netif, &ip_info));
+        CLOCK_ETH_RETURN_ON_ERROR(
+            esp_netif_set_ip_info(s_eth_netif, &ip_info));
 
         ESP_LOGI(TAG, "Static Ethernet IP configured: 192.168.137.205");
     }
 
-    ESP_ERROR_CHECK(esp_event_handler_register(ETH_EVENT,
-                                               ESP_EVENT_ANY_ID,
-                                               &eth_event_handler,
-                                               NULL));
+    CLOCK_ETH_RETURN_ON_ERROR(esp_event_handler_register(ETH_EVENT,
+                                                         ESP_EVENT_ANY_ID,
+                                                         &eth_event_handler,
+                                                         NULL));
 
-    ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT,
-                                               IP_EVENT_ETH_GOT_IP,
-                                               &got_ip_event_handler,
-                                               NULL));
+    CLOCK_ETH_RETURN_ON_ERROR(esp_event_handler_register(IP_EVENT,
+                                                         IP_EVENT_ETH_GOT_IP,
+                                                         &got_ip_event_handler,
+                                                         NULL));
 
-    ESP_ERROR_CHECK(esp_eth_start(s_eth_handle));
+    CLOCK_ETH_RETURN_ON_ERROR(esp_eth_start(s_eth_handle));
 
     ESP_LOGI(TAG, "W5500 Ethernet init done");
 
@@ -574,6 +572,64 @@ esp_err_t clock_ethernet_init_static(void)
 esp_err_t clock_ethernet_init_dhcp(void)
 {
     return clock_ethernet_init_common(false);
+}
+
+bool clock_ethernet_wait_for_ip(uint32_t timeout_ms)
+{
+    if (s_eth_events == NULL) {
+        return false;
+    }
+
+    const EventBits_t bits = xEventGroupWaitBits(
+        s_eth_events,
+        ETH_GOT_IP_BIT,
+        pdFALSE,
+        pdFALSE,
+        pdMS_TO_TICKS(timeout_ms));
+
+    if ((bits & ETH_GOT_IP_BIT) == 0) {
+        ESP_LOGW(TAG, "Ethernet connection timed out after %u ms",
+                 static_cast<unsigned>(timeout_ms));
+        return false;
+    }
+
+    return true;
+}
+
+bool clock_ethernet_route_is_ready(void)
+{
+    if (s_eth_netif == NULL) {
+        return false;
+    }
+
+    esp_netif_ip_info_t ip_info = {};
+    esp_netif_dns_info_t dns_info = {};
+
+    return esp_netif_get_ip_info(s_eth_netif, &ip_info) == ESP_OK &&
+           ip_info.ip.addr != 0 &&
+           ip_info.gw.addr != 0 &&
+           esp_netif_get_dns_info(s_eth_netif,
+                                  ESP_NETIF_DNS_MAIN,
+                                  &dns_info) == ESP_OK &&
+           dns_info.ip.type == ESP_IPADDR_TYPE_V4 &&
+           dns_info.ip.u_addr.ip4.addr != 0;
+}
+
+esp_err_t clock_ethernet_stop(void)
+{
+    if (s_eth_handle == NULL) {
+        return ESP_OK;
+    }
+
+    if (s_eth_events != NULL) {
+        xEventGroupClearBits(s_eth_events, ETH_GOT_IP_BIT);
+    }
+
+    const esp_err_t result = esp_eth_stop(s_eth_handle);
+    if (result != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to stop W5500: %s", esp_err_to_name(result));
+    }
+    return result;
 }
 
 esp_err_t clock_ethernet_start_tcp_server(clock_ethernet_rx_callback_t rx_callback)

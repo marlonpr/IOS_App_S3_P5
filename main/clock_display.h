@@ -38,7 +38,8 @@ void clock_display_draw_logo(Hub75Driver *driver);
 void clock_display_draw_startup(Hub75Driver *driver,
                                 int display_mode,
                                 int brightness_level,
-                                hour_format_t format);
+                                hour_format_t format,
+                                const char *network_mode_label);
 
 void clock_display_make_date_scroll_text(const ds3231_time_t *time,
                                          char *buf,

@@ -5,6 +5,9 @@ idf_component_register(
     "clock_display.cpp" 
     "clock_menu.cpp" 
     "clock_ethernet.cpp" 
+    "clock_wifi.cpp"
+    "clock_network.cpp"
+    "clock_network_core.cpp"
     "clock_alarm.cpp" 
     "clock_protocol.cpp" 
     "clock_protocol_stream.cpp"
@@ -24,6 +27,7 @@ idf_component_register(
         esp_event
         esp_netif
         esp_eth
+        esp_wifi
         driver
         lwip
         espressif__w5500

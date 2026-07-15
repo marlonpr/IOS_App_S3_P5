@@ -1,5 +1,6 @@
 #pragma once
 
+#include <stddef.h>
 #include <stdint.h>
 #include "esp_err.h"
 
@@ -17,6 +18,9 @@ uint8_t clock_settings_load_mode(uint8_t default_mode);
 
 void clock_settings_save_brightness(uint8_t brightness_level);
 uint8_t clock_settings_load_brightness(uint8_t default_brightness_level);
+
+esp_err_t clock_settings_save_network_mode(uint8_t network_mode);
+uint8_t clock_settings_load_network_mode(void);
 
 
 esp_err_t clock_settings_save_ethernet_alarms(const void *alarms, size_t size);

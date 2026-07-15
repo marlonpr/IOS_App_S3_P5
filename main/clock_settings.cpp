@@ -10,6 +10,7 @@ static const char *TAG = "CLOCK_SETTINGS";
 #define NVS_KEY_FORMAT     "format"
 #define NVS_KEY_MODE       "mode"
 #define NVS_KEY_BRIGHTNESS "brightness"
+#define NVS_KEY_NETWORK_MODE "network_mode"
 
 #define NVS_KEY_ETH_ALARMS "eth_alarms"
 
@@ -250,5 +251,34 @@ uint8_t clock_settings_load_brightness(uint8_t default_brightness_level)
         value = default_brightness_level;
     }
 
+    return value;
+}
+
+esp_err_t clock_settings_save_network_mode(uint8_t network_mode)
+{
+    if (network_mode > 2) {
+        ESP_LOGE(TAG, "Rejecting invalid network mode %u", network_mode);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    const esp_err_t result =
+        save_u8_value(NVS_KEY_NETWORK_MODE, network_mode);
+    if (result == ESP_OK) {
+        ESP_LOGI(TAG, "Saved network mode=%u", network_mode);
+    }
+    return result;
+}
+
+uint8_t clock_settings_load_network_mode(void)
+{
+    const uint8_t value = load_u8_value(NVS_KEY_NETWORK_MODE, 0);
+    if (value > 2) {
+        ESP_LOGW(TAG,
+                 "Invalid network mode %u in NVS; using Auto",
+                 value);
+        return 0;
+    }
+
+    ESP_LOGI(TAG, "Loaded network mode=%u", value);
     return value;
 }

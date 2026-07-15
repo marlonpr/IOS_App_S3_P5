@@ -1,14 +1,35 @@
-# put here your custom config value
-menu "Example Configuration"
+menu "Clock Network Configuration"
 config ESP_WIFI_SSID
-    string "WiFi SSID"
-    default "myssid"
+    string "Wi-Fi station SSID"
+    default ""
     help
-	SSID (network name) for the example to connect to.
+	SSID used only when the saved boot mode selects Wi-Fi. This value is
+	compiled into the firmware; use it only where project configuration is
+	appropriate for credential storage.
 
 config ESP_WIFI_PASSWORD
-    string "WiFi Password"
-    default "mypassword"
+    string "Wi-Fi station password"
+    default ""
     help
-	WiFi password (WPA or WPA2) for the example to use.
+	Password used by Wi-Fi station mode. It is never written to firmware logs.
+
+config CLOCK_NETWORK_AUTO_ETH_TIMEOUT_MS
+    int "Auto mode Ethernet timeout (ms)"
+    range 1000 60000
+    default 9000
+
+config CLOCK_NETWORK_ETH_TIMEOUT_MS
+    int "Ethernet-only timeout (ms)"
+    range 1000 60000
+    default 15000
+
+config CLOCK_NETWORK_AUTO_WIFI_TIMEOUT_MS
+    int "Auto fallback Wi-Fi timeout (ms)"
+    range 1000 60000
+    default 18000
+
+config CLOCK_NETWORK_WIFI_TIMEOUT_MS
+    int "Wi-Fi-only timeout (ms)"
+    range 1000 60000
+    default 20000
 endmenu

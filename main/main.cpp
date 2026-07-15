@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <string.h>
 #include "hub75.h"
 
 #include "freertos/FreeRTOS.h"
@@ -15,6 +16,7 @@
 #include "clock_buttons.h"
 #include "clock_menu.h"
 #include "clock_ethernet.h"
+#include "clock_network.h"
 #include "clock_alarm.h"
 #include "clock_protocol.h"
 #include "clock_modes.h"
@@ -32,6 +34,7 @@
 #define PIN_DOWN GPIO_NUM_42
 
 #define BUTTON_HOLD_MS     1000
+#define NETWORK_MODE_HOLD_MS 10000
 #define BUTTON_DEBOUNCE_MS 500
 #define BUTTON_REPEAT_DELAY_MS 500
 #define BUTTON_REPEAT_RATE_MS  500
@@ -59,6 +62,9 @@ static int64_t g_logo_screen_until_us = 0;
 static char g_message[32] = {0};
 static bool g_message_active = false;
 static int64_t g_message_until_us = 0;
+static char g_next_message[32] = {0};
+static bool g_next_message_pending = false;
+static uint32_t g_next_message_duration_ms = 0;
 
 
 static int brightness_level = 5;        // 1 to 10
@@ -137,6 +143,7 @@ static hour_format_t clock_format = FORMAT_12H;
 // =============================== DISPLAY MODES ===============================
 
 static display_mode_t display_mode = MODE_1;
+static clock_network_mode_t g_saved_network_mode = CLOCK_NETWORK_MODE_AUTO;
 
 
 static void show_temp_message(const char *msg, uint32_t duration_ms)
@@ -150,8 +157,81 @@ static void show_temp_message(const char *msg, uint32_t duration_ms)
     snprintf(g_message, sizeof(g_message), "%s", msg);
     g_message_active = true;
     g_message_until_us = esp_timer_get_time() + ((int64_t)duration_ms * 1000);
+    g_next_message_pending = false;
 
     portEXIT_CRITICAL(&g_data_mux);
+}
+
+static void show_temp_message_sequence(const char *first,
+                                       uint32_t first_duration_ms,
+                                       const char *second,
+                                       uint32_t second_duration_ms)
+{
+    if (!first || !second) {
+        return;
+    }
+
+    portENTER_CRITICAL(&g_data_mux);
+
+    snprintf(g_message, sizeof(g_message), "%s", first);
+    g_message_active = true;
+    g_message_until_us =
+        esp_timer_get_time() + ((int64_t)first_duration_ms * 1000);
+    snprintf(g_next_message, sizeof(g_next_message), "%s", second);
+    g_next_message_pending = true;
+    g_next_message_duration_ms = second_duration_ms;
+
+    portEXIT_CRITICAL(&g_data_mux);
+}
+
+static void draw_temp_message(Hub75Driver *driver, const char *message)
+{
+    if (driver == nullptr || message == nullptr) {
+        return;
+    }
+
+    const char *line1 = nullptr;
+    const char *line2 = nullptr;
+
+    if (strcmp(message, "ETH CONNECTED") == 0) {
+        line1 = "ETH";
+        line2 = "CONNECTED";
+    } else if (strcmp(message, "WIFI CONNECTED") == 0) {
+        line1 = "WIFI";
+        line2 = "CONNECTED";
+    } else if (strcmp(message, "NET NOT CONNECTED") == 0) {
+        line1 = "NET NOT";
+        line2 = "CONNECTED";
+    } else if (strcmp(message, "REBOOT TO APPLY") == 0) {
+        line1 = "REBOOT TO";
+        line2 = "APPLY";
+    }
+
+    if (line1 != nullptr && line2 != nullptr) {
+        draw_string_5x7(*driver,
+                        clock_display_center_x_5x7(line1),
+                        7,
+                        line1,
+                        255,
+                        0,
+                        0);
+        draw_string_5x7(*driver,
+                        clock_display_center_x_5x7(line2),
+                        18,
+                        line2,
+                        255,
+                        255,
+                        0);
+        return;
+    }
+
+    draw_string(*driver,
+                clock_display_center_x_6x9(message),
+                8,
+                message,
+                255,
+                0,
+                0);
 }
 
 
@@ -186,6 +266,7 @@ void display_update_task(void* pvParameters)
 	bool startup_screen_active_copy;
 	
 	bool logo_screen_active_copy;
+	clock_network_mode_t saved_network_mode_copy;
 
     while (true) {
 		clock_menu_check_timeout();		
@@ -328,13 +409,20 @@ void display_update_task(void* pvParameters)
 		    startup_screen_active_copy = false;
 		}
 
+		if (g_message_active && esp_timer_get_time() > g_message_until_us) {
+		    if (g_next_message_pending) {
+		        snprintf(g_message, sizeof(g_message), "%s", g_next_message);
+		        g_message_until_us = esp_timer_get_time() +
+		            ((int64_t)g_next_message_duration_ms * 1000);
+		        g_next_message_pending = false;
+		    } else {
+		        g_message_active = false;
+		    }
+		}
+
 		message_active_copy = g_message_active;
 		snprintf(message_copy, sizeof(message_copy), "%s", g_message);
-
-		if (g_message_active && esp_timer_get_time() > g_message_until_us) {
-		    g_message_active = false;
-		    message_active_copy = false;
-		}
+		saved_network_mode_copy = g_saved_network_mode;
 		
 		logo_screen_active_copy = g_logo_screen_active;
 
@@ -400,6 +488,15 @@ void display_update_task(void* pvParameters)
 		    continue;
 		}		
 		
+		if (message_active_copy) {
+		    scroll_stop();
+		    draw_temp_message(driver, message_copy);
+		    driver->flip_buffer();
+
+		    vTaskDelayUntil(&xLastWakeTime, xFrequency);
+		    continue;
+		}
+
 		if (logo_screen_active_copy) {
 		    scroll_stop();
 
@@ -415,9 +512,11 @@ void display_update_task(void* pvParameters)
 		    scroll_stop();
 
 			clock_display_draw_startup(driver,
-			                           display_mode,
+			                           mode_copy,
 			                           brightness_level,
-			                           clock_format);
+			                           format_copy,
+			                           clock_network_mode_panel_label(
+			                               saved_network_mode_copy));
 
 		    driver->flip_buffer();
 
@@ -425,14 +524,6 @@ void display_update_task(void* pvParameters)
 		    continue;
 		}
 
-		if (message_active_copy) {
-		    draw_string(*driver, clock_display_center_x_6x9(message_copy), 8, message_copy, 255, 0, 0);
-		    driver->flip_buffer();
-
-		    vTaskDelayUntil(&xLastWakeTime, xFrequency);
-		    continue;
-		}
-		
 		if (menu_active_copy) {
 		    scroll_stop();
 		    clock_menu_draw(driver);
@@ -754,6 +845,47 @@ uint8_t clock_modes_get_mode()
     return static_cast<uint8_t>(current_mode);
 }
 
+static esp_err_t save_network_mode_callback(uint8_t mode, void *)
+{
+    return clock_settings_save_network_mode(mode);
+}
+
+static void handle_network_mode_long_hold(void)
+{
+    clock_network_mode_t current_mode;
+
+    portENTER_CRITICAL(&g_data_mux);
+    current_mode = g_saved_network_mode;
+    portEXIT_CRITICAL(&g_data_mux);
+
+    clock_network_mode_t new_mode = current_mode;
+    const esp_err_t result = clock_network_cycle_saved_mode(
+        current_mode,
+        save_network_mode_callback,
+        nullptr,
+        &new_mode);
+
+    if (result != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to save network mode: %s",
+                 esp_err_to_name(result));
+        show_temp_message("NET SAVE FAIL", 2000);
+        return;
+    }
+
+    portENTER_CRITICAL(&g_data_mux);
+    g_saved_network_mode = new_mode;
+    portEXIT_CRITICAL(&g_data_mux);
+
+    show_temp_message_sequence(clock_network_mode_panel_label(new_mode),
+                               1800,
+                               "REBOOT TO APPLY",
+                               2500);
+
+    ESP_LOGI(TAG,
+             "Saved network boot mode changed to %s; live interfaces unchanged",
+             clock_network_mode_label(new_mode));
+}
+
 static void handle_normal_button(button_t btn, ds3231_dev_t *rtc)
 {
     switch (btn)
@@ -815,6 +947,7 @@ void button_task(void *arg)
 
     button_t pending_hold_btn = BTN_NONE;
     TickType_t pending_hold_start = 0;
+    clock_network_long_hold_t up_network_hold = {};
 
     bool ignore_until_release = false;
 	
@@ -846,7 +979,12 @@ void button_task(void *arg)
 		         continue;
 		     }
 
-		     if ((now - last_press_time[btn]) < pdMS_TO_TICKS(BUTTON_DEBOUNCE_MS)) {
+		     if (pending_hold_btn == btn && clock_button_is_pressed(btn)) {
+		         continue;
+		     }
+
+		     if (last_press_time[btn] != 0 &&
+		         (now - last_press_time[btn]) < pdMS_TO_TICKS(BUTTON_DEBOUNCE_MS)) {
 		         continue;
 		     }
 
@@ -899,7 +1037,7 @@ void button_task(void *arg)
 		         {
 		             if ((now - menu_last_repeat) >= pdMS_TO_TICKS(BUTTON_REPEAT_RATE_MS))
 		             {
-						clock_menu_handle_button(btn);
+						clock_menu_handle_button(menu_repeat_btn);
 		                 menu_last_repeat = now;
 		             }
 		         }
@@ -910,10 +1048,11 @@ void button_task(void *arg)
 		     }
 		 } 		 
 
-        /*
-         * Outside menu only:
-         * Execute action after the button stays pressed for BUTTON_HOLD_MS.
-         */
+		/*
+		 * Outside the menu, UP is resolved on release for its normal action so
+		 * a continuous 10-second hold can select network mode without also
+		 * changing display mode. MENU and DOWN retain their existing timing.
+		 */
 		 if (!clock_menu_is_active() &&
 		     pending_hold_btn != BTN_NONE &&
 		     !ignore_until_release)
@@ -921,34 +1060,46 @@ void button_task(void *arg)
             if (clock_button_is_pressed(pending_hold_btn))
             {
                 now = xTaskGetTickCount();
+				const TickType_t held_ticks = now - pending_hold_start;
 
-				if ((now - pending_hold_start) >= pdMS_TO_TICKS(BUTTON_HOLD_MS))
-				{
+				if (pending_hold_btn == BTN_UP) {
+				    const uint32_t held_ms =
+				        static_cast<uint32_t>(held_ticks * portTICK_PERIOD_MS);
+
+				    if (held_ms >= NETWORK_MODE_HOLD_MS &&
+				        clock_network_long_hold_update(&up_network_hold,
+				                                       true,
+				                                       held_ms)) {
+				        ESP_LOGI(TAG, "UP 10-second network mode hold accepted");
+				        handle_network_mode_long_hold();
+				        xQueueReset(button_queue);
+				        pending_hold_btn = BTN_NONE;
+				        ignore_until_release = true;
+				    }
+				} else if (held_ticks >= pdMS_TO_TICKS(BUTTON_HOLD_MS)) {
 				    ESP_LOGI(TAG, "Button %d hold accepted", pending_hold_btn);
 
 				    handle_normal_button(pending_hold_btn, rtc);
-
-				    /*
-				     * Remove any queued bounce/repeat events generated during the hold.
-				     */
 				    xQueueReset(button_queue);
-
-				    /*
-				     * Prevent repeated triggers while the button remains held.
-				     * Also prevents MENU from immediately advancing from BRILLO to HORA.
-				     */
 				    pending_hold_btn = BTN_NONE;
 				    ignore_until_release = true;
 				}
             }
             else
             {
-                /*
-                 * Button was released before hold time.
-                 * Cancel action.
-                 */
-                ESP_LOGI(TAG, "Button hold cancelled");
+				now = xTaskGetTickCount();
+				const TickType_t held_ticks = now - pending_hold_start;
 
+				if (pending_hold_btn == BTN_UP &&
+				    held_ticks >= pdMS_TO_TICKS(BUTTON_HOLD_MS)) {
+				    ESP_LOGI(TAG, "UP normal hold accepted on release");
+				    handle_normal_button(BTN_UP, rtc);
+				    xQueueReset(button_queue);
+				} else {
+				    ESP_LOGI(TAG, "Button hold cancelled");
+				}
+
+				clock_network_long_hold_update(&up_network_hold, false, 0);
                 pending_hold_btn = BTN_NONE;
             }
         }
@@ -961,6 +1112,7 @@ void button_task(void *arg)
 		     pending_hold_btn = BTN_NONE;
 		     menu_repeat_btn = BTN_NONE;
 		     ignore_until_release = false;
+		     clock_network_long_hold_update(&up_network_hold, false, 0);
 		 }
 
         vTaskDelay(pdMS_TO_TICKS(10));
@@ -1055,11 +1207,6 @@ extern "C" void app_main(void)
 	    }
 	}
 
-	ESP_LOGI(TAG, "Starting Ethernet");
-	//ESP_ERROR_CHECK(clock_ethernet_init_static());  //STATIC IP
-	
-	ESP_ERROR_CHECK(clock_ethernet_init_dhcp());  // DHCP
-
 	clock_protocol_context_t protocol_ctx = {
 	    .brightness_level = &brightness_level,
 	    .eth_brightness_pending = &g_eth_brightness_pending,
@@ -1076,8 +1223,6 @@ extern "C" void app_main(void)
 	};
 
 	clock_protocol_init(&protocol_ctx);
-
-	ESP_ERROR_CHECK(clock_ethernet_start_tcp_server(clock_protocol_rx_callback));	
 		
 	ESP_LOGI(TAG, "Starting HUB75");
 
@@ -1111,6 +1256,12 @@ extern "C" void app_main(void)
 	    saved_mode = MODE_1;
 	}
 	display_mode = (display_mode_t)saved_mode;
+
+	g_saved_network_mode = static_cast<clock_network_mode_t>(
+	    clock_settings_load_network_mode());
+	ESP_LOGI(TAG,
+	         "Boot-selected network mode: %s",
+	         clock_network_mode_label(g_saved_network_mode));
 
 	brightness_level = clock_settings_load_brightness(5);
 
@@ -1194,4 +1345,15 @@ extern "C" void app_main(void)
         NULL,
         0
     );
+
+	const esp_err_t network_start_result = clock_network_start(
+	    g_saved_network_mode,
+	    clock_protocol_rx_callback,
+	    show_temp_message);
+	if (network_start_result != ESP_OK) {
+	    ESP_LOGE(TAG,
+	             "Failed to start network boot coordinator: %s",
+	             esp_err_to_name(network_start_result));
+	    show_temp_message("NET NOT CONNECTED", 3000);
+	}
 }
