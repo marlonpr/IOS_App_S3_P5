@@ -24,7 +24,7 @@ uint8_t clock_button_state_update(clock_button_state_t *state,
         const uint32_t held_ms = now_ms - state->pressed_at_ms;
         events |= CLOCK_BUTTON_EVENT_RELEASE;
 
-        if (!state->action_fired && long_hold_ms != 0 &&
+        if (!state->action_fired && long_hold_ms != 0 && normal_hold_ms != 0 &&
             held_ms >= normal_hold_ms) {
             events |= CLOCK_BUTTON_EVENT_NORMAL_ACTION;
             state->action_fired = true;
@@ -45,7 +45,7 @@ uint8_t clock_button_state_update(clock_button_state_t *state,
             events |= CLOCK_BUTTON_EVENT_LONG_ACTION;
             state->action_fired = true;
         }
-    } else if (held_ms >= normal_hold_ms) {
+    } else if (normal_hold_ms != 0 && held_ms >= normal_hold_ms) {
         events |= CLOCK_BUTTON_EVENT_NORMAL_ACTION;
         state->action_fired = true;
     }

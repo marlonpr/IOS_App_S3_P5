@@ -6,6 +6,7 @@
 #include "hub75.h"
 #include "ds3231.h"
 #include "clock_buttons.h"
+#include "clock_display.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -19,6 +20,7 @@ typedef struct {
 
     int *brightness_level;
     int *temporal_brightness;
+    hour_format_t *clock_format;
 
     portMUX_TYPE *data_mux;
     ds3231_time_t *g_now;

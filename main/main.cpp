@@ -917,7 +917,7 @@ static void handle_network_mode_long_hold(void)
              clock_network_mode_label(new_mode));
 }
 
-static void handle_normal_button(button_t btn, ds3231_dev_t *rtc)
+static void handle_normal_button(button_t btn)
 {
     switch (btn)
     {
@@ -925,39 +925,13 @@ static void handle_normal_button(button_t btn, ds3231_dev_t *rtc)
             clock_menu_enter();
             break;
 
-			case BTN_UP:
-			{
-			    clock_modes_advance_mode();
-			    break;
-			}
+        case BTN_UP:
+            clock_modes_advance_mode();
+            break;
 
         case BTN_DOWN:
-        {
-            hour_format_t new_format;
-
-            portENTER_CRITICAL(&g_data_mux);
-
-            if (clock_format == FORMAT_12H) {
-                clock_format = FORMAT_24H;
-            } else {
-                clock_format = FORMAT_12H;
-            }
-
-            new_format = clock_format;
-
-            portEXIT_CRITICAL(&g_data_mux);
-
-            clock_settings_save_format((uint8_t)new_format);
-
-            show_temp_message(new_format == FORMAT_24H ? "24HRS:ON" : "24HRS:OFF",
-                              1000);
-
-            ESP_LOGI(TAG,
-                     "Clock format changed to %s",
-                     new_format == FORMAT_24H ? "24H" : "12H");
-
+            /* DOWN has no normal action outside the menu. */
             break;
-        }
 
         default:
             break;
@@ -970,7 +944,7 @@ void button_task(void *arg)
     static constexpr size_t kButtonCount =
         sizeof(kButtons) / sizeof(kButtons[0]);
 
-    ds3231_dev_t *rtc = (ds3231_dev_t *)arg;
+    (void)arg;
     QueueHandle_t button_queue = clock_buttons_get_queue();
     clock_button_state_t states[kButtonCount] = {};
     uint32_t menu_repeat_at_ms[kButtonCount] = {};
@@ -1018,10 +992,16 @@ void button_task(void *arg)
             previous_level[slot] = raw_level;
 #endif
 
+            const uint32_t normal_hold_ms =
+                btn == BTN_DOWN ? 0 : BUTTON_HOLD_MS;
             const uint32_t long_hold_ms =
-                btn == BTN_UP ? NETWORK_MODE_HOLD_MS : 0;
+                btn == BTN_DOWN ? NETWORK_MODE_HOLD_MS : 0;
             const uint8_t events = clock_button_state_update(
-                &states[slot], raw_level, now_ms, BUTTON_HOLD_MS, long_hold_ms);
+                &states[slot],
+                raw_level,
+                now_ms,
+                normal_hold_ms,
+                long_hold_ms);
 
             if ((events & CLOCK_BUTTON_EVENT_PRESS) != 0) {
 #if CONFIG_CLOCK_BUTTON_DEBUG
@@ -1062,14 +1042,16 @@ void button_task(void *arg)
 #if CONFIG_CLOCK_BUTTON_DEBUG
                 ESP_LOGI(TAG, "normal action: %s", clock_button_name(btn));
 #endif
-                handle_normal_button(btn, rtc);
+                handle_normal_button(btn);
             }
 
             if ((events & CLOCK_BUTTON_EVENT_LONG_ACTION) != 0) {
 #if CONFIG_CLOCK_BUTTON_DEBUG
                 ESP_LOGI(TAG, "long action: %s", clock_button_name(btn));
 #endif
-                handle_network_mode_long_hold();
+                if (btn == BTN_DOWN) {
+                    handle_network_mode_long_hold();
+                }
             }
         }
 
@@ -1254,6 +1236,7 @@ extern "C" void app_main(void)
 
 	    .brightness_level = &brightness_level,
 	    .temporal_brightness = &temporal_brightness,
+	    .clock_format = &clock_format,
 
 	    .data_mux = &g_data_mux,
 	    .g_now = &g_now,

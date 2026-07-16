@@ -8,26 +8,18 @@
 #include "led_panel.h"
 #include "clock_display.h"
 #include "clock_settings.h"
+#include "clock_menu_model.h"
 
 static const char *TAG = "CLOCK_MENU";
 
 #define MENU_TIMEOUT_US (10 * 1000000)
 
-typedef enum {
-    MENU_IDLE = 0,
-    MENU_BRIGHTNESS,
-    MENU_HOUR,
-    MENU_MINUTE,
-    MENU_DAY,
-    MENU_MONTH,
-    MENU_YEAR,
-} menu_state_t;
-
 static clock_menu_context_t s_ctx = {};
 
 static bool s_menu_active = false;
-static menu_state_t s_menu_state = MENU_IDLE;
+static clock_menu_field_t s_menu_state = CLOCK_MENU_FIELD_IDLE;
 static int64_t s_menu_last_action_us = 0;
+static hour_format_t s_tmp_format = FORMAT_12H;
 
 static ds3231_time_t s_tmp_time = {
     .second = 0,
@@ -163,7 +155,7 @@ void clock_menu_init(clock_menu_context_t *ctx)
     s_ctx = *ctx;
 
     s_menu_active = false;
-    s_menu_state = MENU_IDLE;
+    s_menu_state = CLOCK_MENU_FIELD_IDLE;
     s_menu_last_action_us = 0;
 }
 
@@ -187,8 +179,18 @@ void clock_menu_enter(void)
         *s_ctx.temporal_brightness = *s_ctx.brightness_level;
     }
 
+    if (s_ctx.clock_format) {
+        if (s_ctx.data_mux) {
+            portENTER_CRITICAL(s_ctx.data_mux);
+            s_tmp_format = *s_ctx.clock_format;
+            portEXIT_CRITICAL(s_ctx.data_mux);
+        } else {
+            s_tmp_format = *s_ctx.clock_format;
+        }
+    }
+
     s_menu_active = true;
-    s_menu_state = MENU_BRIGHTNESS;
+    s_menu_state = CLOCK_MENU_FIELD_BRIGHTNESS;
 
     refresh_menu_timeout();
 
@@ -204,7 +206,7 @@ void clock_menu_enter(void)
 static void exit_menu(void)
 {
     s_menu_active = false;
-    s_menu_state = MENU_IDLE;
+    s_menu_state = CLOCK_MENU_FIELD_IDLE;
 
     scroll_stop();
 
@@ -216,7 +218,7 @@ void clock_menu_cancel(void)
     restore_saved_brightness();
 
     s_menu_active = false;
-    s_menu_state = MENU_IDLE;
+    s_menu_state = CLOCK_MENU_FIELD_IDLE;
 
     scroll_stop();
 
@@ -272,11 +274,23 @@ static void save_menu_values(void)
             clock_settings_save_brightness((uint8_t)(*s_ctx.brightness_level));
         }
 
+        if (s_ctx.clock_format) {
+            if (s_ctx.data_mux) {
+                portENTER_CRITICAL(s_ctx.data_mux);
+                *s_ctx.clock_format = s_tmp_format;
+                portEXIT_CRITICAL(s_ctx.data_mux);
+            } else {
+                *s_ctx.clock_format = s_tmp_format;
+            }
+
+            clock_settings_save_format((uint8_t)s_tmp_format);
+        }
+
         if (s_ctx.show_message) {
             s_ctx.show_message("GUARDADO", 1000);
         }
 
-        ESP_LOGI(TAG, "RTC time and brightness saved");
+        ESP_LOGI(TAG, "RTC time, brightness, and clock format saved");
     } else {
         if (s_ctx.show_message) {
             s_ctx.show_message("ERROR", 1000);
@@ -294,7 +308,7 @@ void clock_menu_handle_button(button_t btn)
 
     switch (s_menu_state)
     {
-        case MENU_BRIGHTNESS:
+        case CLOCK_MENU_FIELD_BRIGHTNESS:
         {
             if (!s_ctx.driver || !s_ctx.temporal_brightness) {
                 break;
@@ -317,13 +331,25 @@ void clock_menu_handle_button(button_t btn)
             }
 
             if (btn == BTN_MENU) {
-                s_menu_state = MENU_HOUR;
+                s_menu_state = clock_menu_next_field(s_menu_state);
             }
 
             break;
         }
 
-        case MENU_HOUR:
+        case CLOCK_MENU_FIELD_FORMAT:
+            if (btn == BTN_UP || btn == BTN_DOWN) {
+                s_tmp_format = (hour_format_t)clock_menu_toggle_format(
+                    (uint8_t)s_tmp_format);
+            }
+
+            if (btn == BTN_MENU) {
+                s_menu_state = clock_menu_next_field(s_menu_state);
+            }
+
+            break;
+
+        case CLOCK_MENU_FIELD_HOUR:
             if (btn == BTN_UP) {
                 s_tmp_time.hour = (s_tmp_time.hour + 1) % 24;
             }
@@ -333,12 +359,12 @@ void clock_menu_handle_button(button_t btn)
             }
 
             if (btn == BTN_MENU) {
-                s_menu_state = MENU_MINUTE;
+                s_menu_state = clock_menu_next_field(s_menu_state);
             }
 
             break;
 
-        case MENU_MINUTE:
+        case CLOCK_MENU_FIELD_MINUTE:
             if (btn == BTN_UP) {
                 s_tmp_time.minute = (s_tmp_time.minute + 1) % 60;
             }
@@ -348,12 +374,12 @@ void clock_menu_handle_button(button_t btn)
             }
 
             if (btn == BTN_MENU) {
-                s_menu_state = MENU_DAY;
+                s_menu_state = clock_menu_next_field(s_menu_state);
             }
 
             break;
 
-        case MENU_DAY:
+        case CLOCK_MENU_FIELD_DAY:
         {
             int max_day = clock_menu_days_in_month(s_tmp_time.month, s_tmp_time.year);
 
@@ -376,13 +402,13 @@ void clock_menu_handle_button(button_t btn)
             update_tmp_weekday();
 
             if (btn == BTN_MENU) {
-                s_menu_state = MENU_MONTH;
+                s_menu_state = clock_menu_next_field(s_menu_state);
             }
 
             break;
         }
 
-        case MENU_MONTH:
+        case CLOCK_MENU_FIELD_MONTH:
             if (btn == BTN_UP) {
                 s_tmp_time.month = (s_tmp_time.month % 12) + 1;
                 clamp_tmp_day_to_month();
@@ -396,12 +422,12 @@ void clock_menu_handle_button(button_t btn)
             update_tmp_weekday();
 
             if (btn == BTN_MENU) {
-                s_menu_state = MENU_YEAR;
+                s_menu_state = clock_menu_next_field(s_menu_state);
             }
 
             break;
 
-        case MENU_YEAR:
+        case CLOCK_MENU_FIELD_YEAR:
             if (btn == BTN_UP) {
                 s_tmp_time.year = 2000 + ((s_tmp_time.year - 2000 + 1) % 100);
                 clamp_tmp_day_to_month();
@@ -435,7 +461,7 @@ void clock_menu_draw(Hub75Driver *driver)
 
     switch (s_menu_state)
     {
-        case MENU_BRIGHTNESS:
+        case CLOCK_MENU_FIELD_BRIGHTNESS:
             if (s_ctx.temporal_brightness) {
                 snprintf(buf, sizeof(buf), "BRILLO:%d", *s_ctx.temporal_brightness);
             } else {
@@ -443,23 +469,30 @@ void clock_menu_draw(Hub75Driver *driver)
             }
             break;
 
-        case MENU_HOUR:
+        case CLOCK_MENU_FIELD_FORMAT:
+            snprintf(buf,
+                     sizeof(buf),
+                     "FORM:%s",
+                     s_tmp_format == FORMAT_24H ? "24H" : "12H");
+            break;
+
+        case CLOCK_MENU_FIELD_HOUR:
             snprintf(buf, sizeof(buf), "HORA:%02d", s_tmp_time.hour);
             break;
 
-        case MENU_MINUTE:
+        case CLOCK_MENU_FIELD_MINUTE:
             snprintf(buf, sizeof(buf), "MIN:%02d", s_tmp_time.minute);
             break;
 
-        case MENU_DAY:
+        case CLOCK_MENU_FIELD_DAY:
             snprintf(buf, sizeof(buf), "DIA:%02d", s_tmp_time.day);
             break;
 
-        case MENU_MONTH:
+        case CLOCK_MENU_FIELD_MONTH:
             snprintf(buf, sizeof(buf), "MES:%02d", s_tmp_time.month);
             break;
 
-        case MENU_YEAR:
+        case CLOCK_MENU_FIELD_YEAR:
             snprintf(buf, sizeof(buf), "A|O:%02d", s_tmp_time.year - 2000);
             break;
 
@@ -469,7 +502,9 @@ void clock_menu_draw(Hub75Driver *driver)
     }
 
     draw_string(*driver,
-                s_menu_state == MENU_BRIGHTNESS ? 1 : clock_display_center_x_6x9(buf),
+                s_menu_state == CLOCK_MENU_FIELD_BRIGHTNESS
+                    ? 1
+                    : clock_display_center_x_6x9(buf),
                 8,
                 buf,
                 255,

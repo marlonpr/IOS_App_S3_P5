@@ -3,6 +3,7 @@ idf_component_register(
     "clock_settings.cpp" 
     "clock_buttons.cpp" 
     "clock_button_logic.cpp"
+    "clock_menu_model.cpp"
     "clock_display.cpp" 
     "clock_menu.cpp" 
     "clock_ethernet.cpp" 
