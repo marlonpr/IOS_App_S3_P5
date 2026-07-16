@@ -14,6 +14,7 @@
 #include "clock_display.h"
 #include "clock_settings.h"
 #include "clock_buttons.h"
+#include "clock_button_logic.h"
 #include "clock_menu.h"
 #include "clock_ethernet.h"
 #include "clock_network.h"
@@ -35,7 +36,6 @@
 
 #define BUTTON_HOLD_MS     1000
 #define NETWORK_MODE_HOLD_MS 10000
-#define BUTTON_DEBOUNCE_MS 500
 #define BUTTON_REPEAT_DELAY_MS 500
 #define BUTTON_REPEAT_RATE_MS  500
 
@@ -43,7 +43,6 @@
 //ip_info.ip.addr      = ESP_IP4TOADDR(192, 168, 10, 50); 50 for device 1, 51 for device 2 and so on
 
 static const char* TAG = "MAIN";
-
 
 // =============================== HUB75 GLOBAL OBJECTS ===============================
 
@@ -967,185 +966,112 @@ static void handle_normal_button(button_t btn, ds3231_dev_t *rtc)
 
 void button_task(void *arg)
 {
+    static const button_t kButtons[] = {BTN_MENU, BTN_UP, BTN_DOWN};
+    static constexpr size_t kButtonCount =
+        sizeof(kButtons) / sizeof(kButtons[0]);
+
     ds3231_dev_t *rtc = (ds3231_dev_t *)arg;
-	QueueHandle_t button_queue = clock_buttons_get_queue();
+    QueueHandle_t button_queue = clock_buttons_get_queue();
+    clock_button_state_t states[kButtonCount] = {};
+    uint32_t menu_repeat_at_ms[kButtonCount] = {};
+#if CONFIG_CLOCK_BUTTON_DEBUG
+    int previous_level[kButtonCount] = {-1, -1, -1};
+    uint32_t next_raw_level_log_ms = 0;
+#endif
 
+    ESP_LOGI(TAG, "Button task running independently of network/OTA startup");
 
-    TickType_t last_press_time[3] = {
-        0,
-        0,
-        0
-    };
-
-    button_t pending_hold_btn = BTN_NONE;
-    TickType_t pending_hold_start = 0;
-    clock_network_long_hold_t up_network_hold = {};
-
-    bool ignore_until_release = false;
-	
-	button_t menu_repeat_btn = BTN_NONE;
-	TickType_t menu_repeat_start = 0;
-	TickType_t menu_last_repeat = 0;
-
-    while (true)
-    {
-        button_t btn;
-        TickType_t now = xTaskGetTickCount();
-
-        /*
-         * Use short timeout instead of portMAX_DELAY so the task can check
-         * whether a pending button has been held long enough.
-         */
-		 if (xQueueReceive(button_queue, &btn, pdMS_TO_TICKS(10)))
-		 {
-		     if (btn < BTN_MENU || btn > BTN_DOWN) {
-		         continue;
-		     }
-
-		     /*
-		      * Important:
-		      * After a hold action outside the menu, ignore any queued/bounce events
-		      * until all buttons are released.
-		      */
-		     if (ignore_until_release) {
-		         continue;
-		     }
-
-		     if (pending_hold_btn == btn && clock_button_is_pressed(btn)) {
-		         continue;
-		     }
-
-		     if (last_press_time[btn] != 0 &&
-		         (now - last_press_time[btn]) < pdMS_TO_TICKS(BUTTON_DEBOUNCE_MS)) {
-		         continue;
-		     }
-
-		     last_press_time[btn] = now;
-
-		     /*
-		      * Inside menu:
-		      * Buttons act immediately.
-		      */
-			  if (clock_menu_is_active()) 
-			  {			  
-				clock_menu_handle_button(btn);
-
-			      /*
-			       * Inside menu, only UP and DOWN repeat.
-			       * MENU should not repeat, because it changes fields.
-			       */
-			      if (btn == BTN_UP || btn == BTN_DOWN) {
-			          menu_repeat_btn = btn;
-			          menu_repeat_start = now;
-			          menu_last_repeat = now;
-			      }
-
-			      continue;
-			  }
-
-		     /*
-		      * Outside menu:
-		      * Do not execute immediately.
-		      * Start hold detection.
-		      */
-		     pending_hold_btn = btn;
-		     pending_hold_start = now;
-
-		     ESP_LOGI(TAG, "Button %d pressed, waiting for hold", btn);
-		 }	 		 
-		 
-		 /*
-		  * Inside menu:
-		  * Auto-repeat UP/DOWN while held.
-		  */
-		  if (clock_menu_is_active() &&
-		      menu_repeat_btn != BTN_NONE)
-		 {
-		     if (clock_button_is_pressed(menu_repeat_btn))
-		     {
-		         now = xTaskGetTickCount();
-
-		         if ((now - menu_repeat_start) >= pdMS_TO_TICKS(BUTTON_REPEAT_DELAY_MS))
-		         {
-		             if ((now - menu_last_repeat) >= pdMS_TO_TICKS(BUTTON_REPEAT_RATE_MS))
-		             {
-						clock_menu_handle_button(menu_repeat_btn);
-		                 menu_last_repeat = now;
-		             }
-		         }
-		     }
-		     else
-		     {
-		         menu_repeat_btn = BTN_NONE;
-		     }
-		 } 		 
-
-		/*
-		 * Outside the menu, UP is resolved on release for its normal action so
-		 * a continuous 10-second hold can select network mode without also
-		 * changing display mode. MENU and DOWN retain their existing timing.
-		 */
-		 if (!clock_menu_is_active() &&
-		     pending_hold_btn != BTN_NONE &&
-		     !ignore_until_release)
-        {
-            if (clock_button_is_pressed(pending_hold_btn))
-            {
-                now = xTaskGetTickCount();
-				const TickType_t held_ticks = now - pending_hold_start;
-
-				if (pending_hold_btn == BTN_UP) {
-				    const uint32_t held_ms =
-				        static_cast<uint32_t>(held_ticks * portTICK_PERIOD_MS);
-
-				    if (held_ms >= NETWORK_MODE_HOLD_MS &&
-				        clock_network_long_hold_update(&up_network_hold,
-				                                       true,
-				                                       held_ms)) {
-				        ESP_LOGI(TAG, "UP 10-second network mode hold accepted");
-				        handle_network_mode_long_hold();
-				        xQueueReset(button_queue);
-				        pending_hold_btn = BTN_NONE;
-				        ignore_until_release = true;
-				    }
-				} else if (held_ticks >= pdMS_TO_TICKS(BUTTON_HOLD_MS)) {
-				    ESP_LOGI(TAG, "Button %d hold accepted", pending_hold_btn);
-
-				    handle_normal_button(pending_hold_btn, rtc);
-				    xQueueReset(button_queue);
-				    pending_hold_btn = BTN_NONE;
-				    ignore_until_release = true;
-				}
-            }
-            else
-            {
-				now = xTaskGetTickCount();
-				const TickType_t held_ticks = now - pending_hold_start;
-
-				if (pending_hold_btn == BTN_UP &&
-				    held_ticks >= pdMS_TO_TICKS(BUTTON_HOLD_MS)) {
-				    ESP_LOGI(TAG, "UP normal hold accepted on release");
-				    handle_normal_button(BTN_UP, rtc);
-				    xQueueReset(button_queue);
-				} else {
-				    ESP_LOGI(TAG, "Button hold cancelled");
-				}
-
-				clock_network_long_hold_update(&up_network_hold, false, 0);
-                pending_hold_btn = BTN_NONE;
-            }
+    while (true) {
+        /* Drain ISR notifications. State is decoded from all GPIOs below, so
+         * a full/bouncing queue can never starve a different button. */
+        button_t queued_btn;
+        while (xQueueReceive(button_queue, &queued_btn, 0) == pdTRUE) {
         }
 
-        /*
-         * Re-arm buttons only after all are released.
-         */
-		 if (clock_buttons_all_released())
-		 {
-		     pending_hold_btn = BTN_NONE;
-		     menu_repeat_btn = BTN_NONE;
-		     ignore_until_release = false;
-		     clock_network_long_hold_update(&up_network_hold, false, 0);
-		 }
+        const uint32_t now_ms =
+            static_cast<uint32_t>(xTaskGetTickCount() * portTICK_PERIOD_MS);
+        int raw_levels[kButtonCount];
+
+        for (size_t slot = 0; slot < kButtonCount; ++slot) {
+            raw_levels[slot] = clock_button_raw_level(kButtons[slot]);
+        }
+
+#if CONFIG_CLOCK_BUTTON_DEBUG
+        if (static_cast<int32_t>(now_ms - next_raw_level_log_ms) >= 0) {
+            ESP_LOGI(TAG,
+                     "Button raw levels: MENU=%d UP=%d DOWN=%d",
+                     raw_levels[0],
+                     raw_levels[1],
+                     raw_levels[2]);
+            next_raw_level_log_ms = now_ms + 3000;
+        }
+#endif
+
+        for (size_t slot = 0; slot < kButtonCount; ++slot) {
+            const button_t btn = kButtons[slot];
+            const int raw_level = raw_levels[slot];
+
+#if CONFIG_CLOCK_BUTTON_DEBUG
+            if (raw_level != previous_level[slot]) {
+                ESP_LOGI(TAG, "raw %s GPIO level=%d", clock_button_name(btn), raw_level);
+            }
+            previous_level[slot] = raw_level;
+#endif
+
+            const uint32_t long_hold_ms =
+                btn == BTN_UP ? NETWORK_MODE_HOLD_MS : 0;
+            const uint8_t events = clock_button_state_update(
+                &states[slot], raw_level, now_ms, BUTTON_HOLD_MS, long_hold_ms);
+
+            if ((events & CLOCK_BUTTON_EVENT_PRESS) != 0) {
+#if CONFIG_CLOCK_BUTTON_DEBUG
+                ESP_LOGI(TAG, "decoded press: %s", clock_button_name(btn));
+#endif
+                if (clock_menu_is_active()) {
+#if CONFIG_CLOCK_BUTTON_DEBUG
+                    ESP_LOGI(TAG, "short press action: %s", clock_button_name(btn));
+#endif
+                    clock_menu_handle_button(btn);
+                    if (btn == BTN_UP || btn == BTN_DOWN) {
+                        menu_repeat_at_ms[slot] = now_ms + BUTTON_REPEAT_DELAY_MS;
+                    }
+                }
+            }
+
+            if ((events & CLOCK_BUTTON_EVENT_RELEASE) != 0) {
+#if CONFIG_CLOCK_BUTTON_DEBUG
+                ESP_LOGI(TAG, "decoded release: %s", clock_button_name(btn));
+#endif
+                menu_repeat_at_ms[slot] = 0;
+            }
+
+            if (clock_menu_is_active()) {
+                if ((btn == BTN_UP || btn == BTN_DOWN) && states[slot].pressed &&
+                    menu_repeat_at_ms[slot] != 0 &&
+                    static_cast<int32_t>(now_ms - menu_repeat_at_ms[slot]) >= 0) {
+#if CONFIG_CLOCK_BUTTON_DEBUG
+                    ESP_LOGI(TAG, "short press action (repeat): %s", clock_button_name(btn));
+#endif
+                    clock_menu_handle_button(btn);
+                    menu_repeat_at_ms[slot] = now_ms + BUTTON_REPEAT_RATE_MS;
+                }
+                continue;
+            }
+
+            if ((events & CLOCK_BUTTON_EVENT_NORMAL_ACTION) != 0) {
+#if CONFIG_CLOCK_BUTTON_DEBUG
+                ESP_LOGI(TAG, "normal action: %s", clock_button_name(btn));
+#endif
+                handle_normal_button(btn, rtc);
+            }
+
+            if ((events & CLOCK_BUTTON_EVENT_LONG_ACTION) != 0) {
+#if CONFIG_CLOCK_BUTTON_DEBUG
+                ESP_LOGI(TAG, "long action: %s", clock_button_name(btn));
+#endif
+                handle_network_mode_long_hold();
+            }
+        }
 
         vTaskDelay(pdMS_TO_TICKS(10));
     }
@@ -1257,7 +1183,7 @@ extern "C" void app_main(void)
 	};
 
 	clock_protocol_init(&protocol_ctx);
-		
+
 	ESP_LOGI(TAG, "Starting HUB75");
 
     if (!driver.begin()) {
@@ -1390,4 +1316,5 @@ extern "C" void app_main(void)
 	             esp_err_to_name(network_start_result));
 	    show_network_status_message("NET NOT CONNECTED", 3000);
 	}
+
 }

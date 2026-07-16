@@ -26,6 +26,8 @@ QueueHandle_t clock_buttons_get_queue(void);
 
 bool clock_button_is_pressed(button_t btn);
 bool clock_buttons_all_released(void);
+int clock_button_raw_level(button_t btn);
+const char *clock_button_name(button_t btn);
 
 #ifdef __cplusplus
 }

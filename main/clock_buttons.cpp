@@ -11,6 +11,56 @@ static gpio_num_t s_pin_down = GPIO_NUM_NC;
 
 static QueueHandle_t s_button_queue = NULL;
 
+static esp_err_t configure_button_pin(gpio_num_t pin, const char *name)
+{
+    esp_err_t ret = gpio_reset_pin(pin);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG,
+                 "%s GPIO%d reset failed: %s",
+                 name,
+                 pin,
+                 esp_err_to_name(ret));
+        return ret;
+    }
+
+    gpio_config_t io_conf = {};
+    io_conf.pin_bit_mask = 1ULL << pin;
+    io_conf.mode = GPIO_MODE_INPUT;
+    io_conf.pull_up_en = GPIO_PULLUP_ENABLE;
+    io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
+    io_conf.intr_type = GPIO_INTR_NEGEDGE;
+
+    ret = gpio_config(&io_conf);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG,
+                 "%s GPIO%d configuration failed: %s",
+                 name,
+                 pin,
+                 esp_err_to_name(ret));
+        return ret;
+    }
+
+    ESP_LOGI(TAG,
+             "%s GPIO%d configured active-low input with pull-up",
+             name,
+             pin);
+    return ESP_OK;
+}
+
+const char *clock_button_name(button_t btn)
+{
+    switch (btn) {
+        case BTN_MENU:
+            return "MENU";
+        case BTN_UP:
+            return "UP";
+        case BTN_DOWN:
+            return "DOWN";
+        default:
+            return "UNKNOWN";
+    }
+}
+
 static int button_pin(button_t btn)
 {
     switch (btn)
@@ -52,28 +102,18 @@ esp_err_t clock_buttons_init(gpio_num_t menu_pin,
     s_pin_up = up_pin;
     s_pin_down = down_pin;
 
-    gpio_config_t io_conf = {};
-
-    io_conf.pin_bit_mask =
-        (1ULL << s_pin_menu) |
-        (1ULL << s_pin_up)   |
-        (1ULL << s_pin_down);
-
-    io_conf.mode = GPIO_MODE_INPUT;
-
-    /*
-     * External pull-ups:
-     * GPIO ---- button ---- GND
-     * GPIO ---- 10k pull-up ---- 3.3V
-     */
-    io_conf.pull_up_en = GPIO_PULLUP_DISABLE;
-    io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
-
-    io_conf.intr_type = GPIO_INTR_NEGEDGE;
-
-    esp_err_t ret = gpio_config(&io_conf);
+    esp_err_t ret = configure_button_pin(s_pin_menu, "MENU");
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "gpio_config failed: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    ret = configure_button_pin(s_pin_up, "UP");
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    ret = configure_button_pin(s_pin_down, "DOWN");
+    if (ret != ESP_OK) {
         return ret;
     }
 
@@ -113,7 +153,7 @@ esp_err_t clock_buttons_init(gpio_num_t menu_pin,
     }
 
     ESP_LOGI(TAG,
-             "Buttons initialized: MENU=%d UP=%d DOWN=%d",
+             "Buttons initialized active-low with pull-ups: MENU=%d UP=%d DOWN=%d",
              s_pin_menu,
              s_pin_up,
              s_pin_down);
@@ -128,17 +168,7 @@ QueueHandle_t clock_buttons_get_queue(void)
 
 bool clock_button_is_pressed(button_t btn)
 {
-    int pin = button_pin(btn);
-
-    if (pin < 0) {
-        return false;
-    }
-
-    /*
-     * released = HIGH
-     * pressed  = LOW
-     */
-    return gpio_get_level((gpio_num_t)pin) == 0;
+    return clock_button_raw_level(btn) == 0;
 }
 
 bool clock_buttons_all_released(void)
@@ -146,4 +176,10 @@ bool clock_buttons_all_released(void)
     return gpio_get_level(s_pin_menu) &&
            gpio_get_level(s_pin_up)   &&
            gpio_get_level(s_pin_down);
+}
+
+int clock_button_raw_level(button_t btn)
+{
+    const int pin = button_pin(btn);
+    return pin < 0 ? 1 : gpio_get_level((gpio_num_t)pin);
 }

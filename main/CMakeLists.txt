@@ -2,6 +2,7 @@ idf_component_register(
     SRCS "main.cpp" 
     "clock_settings.cpp" 
     "clock_buttons.cpp" 
+    "clock_button_logic.cpp"
     "clock_display.cpp" 
     "clock_menu.cpp" 
     "clock_ethernet.cpp" 

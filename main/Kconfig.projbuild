@@ -1,3 +1,12 @@
+menu "Clock Button Configuration"
+config CLOCK_BUTTON_DEBUG
+    bool "Enable physical button debug logs"
+    default n
+    help
+        Log raw active-low GPIO levels, decoded press/release events, and
+        normal/long actions. Enable only while diagnosing physical buttons.
+endmenu
+
 menu "Clock Network Configuration"
 config ESP_WIFI_SSID
     string "Wi-Fi station SSID"
