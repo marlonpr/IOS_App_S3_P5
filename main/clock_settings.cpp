@@ -11,6 +11,8 @@ static const char *TAG = "CLOCK_SETTINGS";
 #define NVS_KEY_MODE       "mode"
 #define NVS_KEY_BRIGHTNESS "brightness"
 #define NVS_KEY_NETWORK_MODE "network_mode"
+#define NVS_KEY_LOGO_SECONDS "logo_sec"
+#define NVS_KEY_MODE_SECONDS "mode_sec"
 
 #define NVS_KEY_ETH_ALARMS "eth_alarms"
 
@@ -91,6 +93,78 @@ static uint8_t load_u8_value(const char *key, uint8_t default_value)
     ESP_LOGI(TAG, "Loaded %s=%u", key, value);
 
     return value;
+}
+
+esp_err_t clock_settings_save_display_intervals(uint16_t logo_seconds,
+                                                uint16_t mode_seconds)
+{
+    nvs_handle_t handle;
+    esp_err_t ret = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &handle);
+
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG,
+                 "NVS open failed for display intervals: %s",
+                 esp_err_to_name(ret));
+        return ret;
+    }
+
+    ret = nvs_set_u16(handle, NVS_KEY_LOGO_SECONDS, logo_seconds);
+    if (ret == ESP_OK) {
+        ret = nvs_set_u16(handle, NVS_KEY_MODE_SECONDS, mode_seconds);
+    }
+    if (ret == ESP_OK) {
+        ret = nvs_commit(handle);
+    }
+
+    nvs_close(handle);
+
+    if (ret == ESP_OK) {
+        ESP_LOGI(TAG,
+                 "Saved display intervals: logo=%u s mode=%u s",
+                 logo_seconds,
+                 mode_seconds);
+    } else {
+        ESP_LOGE(TAG,
+                 "Failed to save display intervals: %s",
+                 esp_err_to_name(ret));
+    }
+
+    return ret;
+}
+
+esp_err_t clock_settings_load_display_intervals(uint16_t *logo_seconds,
+                                                uint16_t *mode_seconds)
+{
+    if (logo_seconds == nullptr || mode_seconds == nullptr) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    nvs_handle_t handle;
+    esp_err_t ret = nvs_open(NVS_NAMESPACE, NVS_READONLY, &handle);
+
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Display intervals not stored; using defaults");
+        return ret;
+    }
+
+    uint16_t stored_logo = 0;
+    uint16_t stored_mode = 0;
+    ret = nvs_get_u16(handle, NVS_KEY_LOGO_SECONDS, &stored_logo);
+    if (ret == ESP_OK) {
+        ret = nvs_get_u16(handle, NVS_KEY_MODE_SECONDS, &stored_mode);
+    }
+
+    nvs_close(handle);
+
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG,
+                 "Incomplete display interval pair; using defaults");
+        return ret;
+    }
+
+    *logo_seconds = stored_logo;
+    *mode_seconds = stored_mode;
+    return ESP_OK;
 }
 
 

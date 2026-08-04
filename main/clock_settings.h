@@ -22,6 +22,11 @@ uint8_t clock_settings_load_brightness(uint8_t default_brightness_level);
 esp_err_t clock_settings_save_network_mode(uint8_t network_mode);
 uint8_t clock_settings_load_network_mode(void);
 
+esp_err_t clock_settings_save_display_intervals(uint16_t logo_seconds,
+                                                uint16_t mode_seconds);
+esp_err_t clock_settings_load_display_intervals(uint16_t *logo_seconds,
+                                                uint16_t *mode_seconds);
+
 
 esp_err_t clock_settings_save_ethernet_alarms(const void *alarms, size_t size);
 esp_err_t clock_settings_load_ethernet_alarms(void *alarms, size_t size);

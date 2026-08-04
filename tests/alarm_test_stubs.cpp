@@ -3,6 +3,7 @@
 
 #include "clock_logo_manager.h"
 #include "clock_menu.h"
+#include "clock_modes.h"
 #include "clock_palette.h"
 #include "clock_settings.h"
 #include "driver/gpio.h"
@@ -15,6 +16,10 @@ int g_alarm_test_load_count = 0;
 size_t g_alarm_test_last_save_size = 0;
 
 static unsigned char s_alarm_test_last_save_blob[4096] = {};
+static clock_mode_intervals_t s_alarm_test_intervals = {
+    CLOCK_DEFAULT_LOGO_INTERVAL_SECONDS,
+    CLOCK_DEFAULT_MODE_INTERVAL_SECONDS,
+};
 
 void alarm_test_reset_stubs(void)
 {
@@ -23,6 +28,10 @@ void alarm_test_reset_stubs(void)
     g_alarm_test_load_count = 0;
     g_alarm_test_last_save_size = 0;
     memset(s_alarm_test_last_save_blob, 0, sizeof(s_alarm_test_last_save_blob));
+    s_alarm_test_intervals = {
+        CLOCK_DEFAULT_LOGO_INTERVAL_SECONDS,
+        CLOCK_DEFAULT_MODE_INTERVAL_SECONDS,
+    };
 }
 
 void alarm_test_reset_save_count(void)
@@ -176,6 +185,41 @@ esp_err_t clock_modes_set_mode(uint8_t mode)
 uint8_t clock_modes_get_mode(void)
 {
     return 1;
+}
+
+clock_mode_intervals_t clock_modes_get_intervals(void)
+{
+    return s_alarm_test_intervals;
+}
+
+bool clock_modes_validate_intervals(const clock_mode_intervals_t *intervals)
+{
+    return intervals != nullptr &&
+           intervals->logo_seconds >= CLOCK_MIN_DISPLAY_INTERVAL_SECONDS &&
+           intervals->logo_seconds <= CLOCK_MAX_DISPLAY_INTERVAL_SECONDS &&
+           intervals->mode_seconds >= CLOCK_MIN_DISPLAY_INTERVAL_SECONDS &&
+           intervals->mode_seconds <= CLOCK_MAX_DISPLAY_INTERVAL_SECONDS;
+}
+
+esp_err_t clock_modes_set_intervals(const clock_mode_intervals_t *intervals)
+{
+    if (!clock_modes_validate_intervals(intervals)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    s_alarm_test_intervals = *intervals;
+    clock_modes_reset_sequences();
+    return ESP_OK;
+}
+
+esp_err_t clock_modes_restore_default_intervals(void)
+{
+    s_alarm_test_intervals = {
+        CLOCK_DEFAULT_LOGO_INTERVAL_SECONDS,
+        CLOCK_DEFAULT_MODE_INTERVAL_SECONDS,
+    };
+    clock_modes_reset_sequences();
+    return ESP_OK;
 }
 
 extern "C" bool clock_palette_is_supported_mode(uint8_t mode)

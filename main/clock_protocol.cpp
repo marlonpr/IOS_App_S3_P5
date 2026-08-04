@@ -367,6 +367,156 @@ static int handle_read_mode_command(const uint8_t *p,
                                     status);
 }
 
+static bool is_display_interval_command(const uint8_t *p, int len)
+{
+    if (p == nullptr || len < 6 ||
+        p[0] != '/' || p[1] != 'T' || p[2] != 'A') {
+        return false;
+    }
+
+    return (p[4] == 'L' && p[5] == 'I') ||
+           (p[4] == 'C' && p[5] == 'I') ||
+           (p[4] == 'D' && p[5] == 'I');
+}
+
+static bool decode_ascii_decimal_u16(const uint8_t *input,
+                                     size_t length,
+                                     uint16_t *out_value)
+{
+    if (input == nullptr || out_value == nullptr || length == 0) {
+        return false;
+    }
+
+    uint32_t value = 0;
+
+    for (size_t i = 0; i < length; ++i) {
+        if (input[i] < '0' || input[i] > '9') {
+            return false;
+        }
+
+        value = (value * 10U) + (uint32_t)(input[i] - '0');
+        if (value > UINT16_MAX) {
+            return false;
+        }
+    }
+
+    *out_value = (uint16_t)value;
+    return true;
+}
+
+static void encode_ascii_decimal_4(uint16_t value, uint8_t *output)
+{
+    output[0] = (uint8_t)('0' + ((value / 1000U) % 10U));
+    output[1] = (uint8_t)('0' + ((value / 100U) % 10U));
+    output[2] = (uint8_t)('0' + ((value / 10U) % 10U));
+    output[3] = (uint8_t)('0' + (value % 10U));
+}
+
+static int build_display_interval_response(
+    uint8_t *tx,
+    int tx_max,
+    uint8_t board_id,
+    uint8_t command_1,
+    uint8_t command_2,
+    const clock_mode_intervals_t *intervals)
+{
+    static constexpr size_t kResponseLength = 15;
+
+    if (tx == nullptr || tx_max < 0 ||
+        (size_t)tx_max < kResponseLength ||
+        !clock_modes_validate_intervals(intervals)) {
+        return -1;
+    }
+
+    tx[0] = '/';
+    tx[1] = 't';
+    tx[2] = 'a';
+    tx[3] = board_id;
+    tx[4] = command_1;
+    tx[5] = command_2;
+    encode_ascii_decimal_4(intervals->logo_seconds, &tx[6]);
+    encode_ascii_decimal_4(intervals->mode_seconds, &tx[10]);
+    tx[14] = '\\';
+    return (int)kResponseLength;
+}
+
+static int handle_display_interval_command(const uint8_t *p,
+                                           int len,
+                                           uint8_t *tx,
+                                           int tx_max)
+{
+    const uint8_t board_id = p[3];
+
+    if (board_id != 0x00 || board_id == 0x5C) {
+        ESP_LOGW(TAG,
+                 "Ignoring display interval command for invalid board ID: %u",
+                 board_id);
+        return -1;
+    }
+
+    if (p[4] == 'L' && p[5] == 'I') {
+        if (len != 7 || p[6] != '\\') {
+            return -1;
+        }
+
+        const clock_mode_intervals_t active = clock_modes_get_intervals();
+        return build_display_interval_response(tx,
+                                               tx_max,
+                                               board_id,
+                                               'l',
+                                               'i',
+                                               &active);
+    }
+
+    if (p[4] == 'C' && p[5] == 'I') {
+        clock_mode_intervals_t requested = {};
+
+        if (len != 15 || p[14] != '\\' ||
+            !decode_ascii_decimal_u16(&p[6], 4, &requested.logo_seconds) ||
+            !decode_ascii_decimal_u16(&p[10], 4, &requested.mode_seconds) ||
+            !clock_modes_validate_intervals(&requested)) {
+            ESP_LOGW(TAG, "Rejecting invalid CI display interval request");
+            return -1;
+        }
+
+        const esp_err_t result = clock_modes_set_intervals(&requested);
+        if (result != ESP_OK) {
+            ESP_LOGE(TAG,
+                     "CI display interval persistence failed: %s",
+                     esp_err_to_name(result));
+            return -1;
+        }
+
+        const clock_mode_intervals_t active = clock_modes_get_intervals();
+        return build_display_interval_response(tx,
+                                               tx_max,
+                                               board_id,
+                                               'c',
+                                               'i',
+                                               &active);
+    }
+
+    if (len != 7 || p[6] != '\\') {
+        return -1;
+    }
+
+    const esp_err_t result = clock_modes_restore_default_intervals();
+    if (result != ESP_OK) {
+        ESP_LOGE(TAG,
+                 "DI display interval persistence failed: %s",
+                 esp_err_to_name(result));
+        return -1;
+    }
+
+    const clock_mode_intervals_t active = clock_modes_get_intervals();
+    return build_display_interval_response(tx,
+                                           tx_max,
+                                           board_id,
+                                           'd',
+                                           'i',
+                                           &active);
+}
+
 static bool palette_tx_has_capacity(uint8_t *tx,
                                     int tx_max,
                                     size_t required)
@@ -851,6 +1001,10 @@ int clock_protocol_rx_callback(const uint8_t *p,
 
 	    if (is_palette_command(p, len)) {
 	        return handle_palette_command(p, len, tx, tx_max);
+	    }
+
+	    if (is_display_interval_command(p, len)) {
+	        return handle_display_interval_command(p, len, tx, tx_max);
 	    }
 
 	    if (is_set_mode_command(p, len)) {
@@ -1403,11 +1557,11 @@ int clock_protocol_rx_callback(const uint8_t *p,
 		        case CLOCK_LOGO_RESTORE_OK:
 		            protocol_result = 0x00;
 
-		            /*
-		             * Force the display-mode logic to fetch the newly
-		             * activated compiled logo.
-		             */
-		            clock_modes_reset_sequences();
+	            /*
+	             * Force the display-mode logic to fetch the newly
+	             * activated compiled logo.
+	             */
+	            clock_modes_reset_sequences();
 		            break;
 
 		        case CLOCK_LOGO_RESTORE_BUSY:
@@ -1542,7 +1696,17 @@ int clock_protocol_rx_callback(const uint8_t *p,
 		         return -1;
 		     }
 
-		     clock_modes_reset_sequences();
+	     const esp_err_t interval_result =
+	         clock_modes_restore_default_intervals();
+
+	     if (interval_result != ESP_OK) {
+	         ESP_LOGE(
+	             TAG,
+	             "RT factory reset failed restoring display intervals: %s",
+	             esp_err_to_name(interval_result)
+	         );
+	         return -1;
+	     }
 
 		     /*
 		      * Let the main task restore brightness, format, mode,

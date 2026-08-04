@@ -1174,6 +1174,7 @@ extern "C" void app_main(void)
     }
 	
 	ESP_ERROR_CHECK(clock_settings_init());	
+	ESP_ERROR_CHECK(clock_modes_init_intervals());
 
 	esp_err_t palette_init_ret = clock_palette_init();
 	if (palette_init_ret != ESP_OK) {

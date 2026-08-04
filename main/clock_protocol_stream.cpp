@@ -59,6 +59,15 @@ static size_t fixed_frame_length(const clock_protocol_stream_t *stream)
         return 7;
     }
 
+    if ((command_1 == 'L' && command_2 == 'I') ||
+        (command_1 == 'D' && command_2 == 'I')) {
+        return 7;
+    }
+
+    if (command_1 == 'C' && command_2 == 'I') {
+        return 15;
+    }
+
     return 0;
 }
 

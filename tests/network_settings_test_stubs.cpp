@@ -125,6 +125,20 @@ esp_err_t nvs_set_u8(nvs_handle_t handle,
     return ESP_OK;
 }
 
+esp_err_t nvs_get_u16(nvs_handle_t,
+                      const char *,
+                      unsigned short *)
+{
+    return ESP_ERR_NVS_NOT_FOUND;
+}
+
+esp_err_t nvs_set_u16(nvs_handle_t,
+                      const char *,
+                      unsigned short)
+{
+    return ESP_OK;
+}
+
 esp_err_t nvs_get_blob(nvs_handle_t,
                        const char *,
                        void *,

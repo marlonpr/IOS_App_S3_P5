@@ -21,6 +21,12 @@ esp_err_t nvs_get_u8(nvs_handle_t handle,
 esp_err_t nvs_set_u8(nvs_handle_t handle,
                      const char *key,
                      unsigned char value);
+esp_err_t nvs_get_u16(nvs_handle_t handle,
+                      const char *key,
+                      unsigned short *out_value);
+esp_err_t nvs_set_u16(nvs_handle_t handle,
+                      const char *key,
+                      unsigned short value);
 esp_err_t nvs_get_blob(nvs_handle_t handle,
                        const char *key,
                        void *out_value,

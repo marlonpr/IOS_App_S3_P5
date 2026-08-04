@@ -11,6 +11,13 @@ static int s_mode_save_count = 0;
 static int s_mode_reset_count = 0;
 static int s_mode_advance_count = 0;
 static esp_err_t s_mode_set_result = ESP_OK;
+static clock_mode_intervals_t s_intervals = {
+    CLOCK_DEFAULT_LOGO_INTERVAL_SECONDS,
+    CLOCK_DEFAULT_MODE_INTERVAL_SECONDS,
+};
+static int s_interval_save_count = 0;
+static int s_interval_restore_count = 0;
+static esp_err_t s_interval_save_result = ESP_OK;
 
 void protocol_test_reset_alarms(void)
 {
@@ -24,6 +31,13 @@ void protocol_test_reset_modes(void)
     s_mode_reset_count = 0;
     s_mode_advance_count = 0;
     s_mode_set_result = ESP_OK;
+    s_intervals = {
+        CLOCK_DEFAULT_LOGO_INTERVAL_SECONDS,
+        CLOCK_DEFAULT_MODE_INTERVAL_SECONDS,
+    };
+    s_interval_save_count = 0;
+    s_interval_restore_count = 0;
+    s_interval_save_result = ESP_OK;
 }
 
 uint8_t protocol_test_display_mode(void)
@@ -54,6 +68,26 @@ void protocol_test_set_mode_result(esp_err_t result)
 void protocol_test_force_display_mode(uint8_t mode)
 {
     s_display_mode = mode;
+}
+
+clock_mode_intervals_t protocol_test_intervals(void)
+{
+    return s_intervals;
+}
+
+int protocol_test_interval_save_count(void)
+{
+    return s_interval_save_count;
+}
+
+int protocol_test_interval_restore_count(void)
+{
+    return s_interval_restore_count;
+}
+
+void protocol_test_set_interval_save_result(esp_err_t result)
+{
+    s_interval_save_result = result;
 }
 
 void clock_alarm_arm_full_replacement(void)
@@ -158,4 +192,53 @@ esp_err_t clock_modes_set_mode(uint8_t mode)
 uint8_t clock_modes_get_mode(void)
 {
     return s_display_mode;
+}
+
+clock_mode_intervals_t clock_modes_get_intervals(void)
+{
+    return s_intervals;
+}
+
+bool clock_modes_validate_intervals(const clock_mode_intervals_t *intervals)
+{
+    return intervals != nullptr &&
+           intervals->logo_seconds >= CLOCK_MIN_DISPLAY_INTERVAL_SECONDS &&
+           intervals->logo_seconds <= CLOCK_MAX_DISPLAY_INTERVAL_SECONDS &&
+           intervals->mode_seconds >= CLOCK_MIN_DISPLAY_INTERVAL_SECONDS &&
+           intervals->mode_seconds <= CLOCK_MAX_DISPLAY_INTERVAL_SECONDS;
+}
+
+esp_err_t clock_modes_set_intervals(const clock_mode_intervals_t *intervals)
+{
+    if (!clock_modes_validate_intervals(intervals)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (s_interval_save_result != ESP_OK) {
+        return s_interval_save_result;
+    }
+
+    if (s_intervals.logo_seconds != intervals->logo_seconds ||
+        s_intervals.mode_seconds != intervals->mode_seconds) {
+        s_interval_save_count++;
+    }
+    s_intervals = *intervals;
+    clock_modes_reset_sequences();
+    return ESP_OK;
+}
+
+esp_err_t clock_modes_restore_default_intervals(void)
+{
+    if (s_interval_save_result != ESP_OK) {
+        return s_interval_save_result;
+    }
+
+    s_interval_save_count++;
+    s_interval_restore_count++;
+    s_intervals = {
+        CLOCK_DEFAULT_LOGO_INTERVAL_SECONDS,
+        CLOCK_DEFAULT_MODE_INTERVAL_SECONDS,
+    };
+    clock_modes_reset_sequences();
+    return ESP_OK;
 }

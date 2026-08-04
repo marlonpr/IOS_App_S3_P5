@@ -974,6 +974,13 @@ CONFIG_PARTITION_TABLE_MD5=y
 # end of Partition Table
 
 #
+# Clock Button Configuration
+#
+# default:
+# CONFIG_CLOCK_BUTTON_DEBUG is not set
+# end of Clock Button Configuration
+
+#
 # Clock Network Configuration
 #
 CONFIG_ESP_WIFI_SSID="FilsemWifi"

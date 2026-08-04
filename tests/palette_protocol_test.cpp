@@ -9,6 +9,7 @@
 #include "clock_palette.h"
 #include "clock_protocol.h"
 #include "clock_protocol_stream.h"
+#include "clock_modes.h"
 #include "esp_err.h"
 
 void palette_test_reset_nvs(void);
@@ -24,6 +25,10 @@ int protocol_test_mode_reset_count(void);
 int protocol_test_mode_advance_count(void);
 void protocol_test_set_mode_result(esp_err_t result);
 void protocol_test_force_display_mode(uint8_t mode);
+clock_mode_intervals_t protocol_test_intervals(void);
+int protocol_test_interval_save_count(void);
+int protocol_test_interval_restore_count(void);
+void protocol_test_set_interval_save_result(esp_err_t result);
 
 static int s_test_count = 0;
 static int s_brightness_level = 5;
@@ -121,6 +126,38 @@ static std::vector<uint8_t> make_sm(uint8_t mode)
 static std::vector<uint8_t> make_rm(void)
 {
     std::vector<uint8_t> request = make_request_prefix('R', 'M');
+    request.push_back('\\');
+    return request;
+}
+
+static std::vector<uint8_t> make_li(void)
+{
+    std::vector<uint8_t> request = make_request_prefix('L', 'I');
+    request.push_back('\\');
+    return request;
+}
+
+static void append_decimal_4(std::vector<uint8_t> *bytes, uint16_t value)
+{
+    bytes->push_back((uint8_t)('0' + ((value / 1000U) % 10U)));
+    bytes->push_back((uint8_t)('0' + ((value / 100U) % 10U)));
+    bytes->push_back((uint8_t)('0' + ((value / 10U) % 10U)));
+    bytes->push_back((uint8_t)('0' + (value % 10U)));
+}
+
+static std::vector<uint8_t> make_ci(uint16_t logo_seconds,
+                                    uint16_t mode_seconds)
+{
+    std::vector<uint8_t> request = make_request_prefix('C', 'I');
+    append_decimal_4(&request, logo_seconds);
+    append_decimal_4(&request, mode_seconds);
+    request.push_back('\\');
+    return request;
+}
+
+static std::vector<uint8_t> make_di(void)
+{
+    std::vector<uint8_t> request = make_request_prefix('D', 'I');
     request.push_back('\\');
     return request;
 }
@@ -610,6 +647,113 @@ static void test_rm_internal_failure_and_board_validation(void)
     REQUIRE_EQ(protocol_test_display_mode(), 5);
 }
 
+static void require_interval_response(const std::vector<uint8_t> &response,
+                                      char command_1,
+                                      char command_2,
+                                      const char *values)
+{
+    REQUIRE_EQ(response.size(), 15u);
+    REQUIRE_EQ(response[0], '/');
+    REQUIRE_EQ(response[1], 't');
+    REQUIRE_EQ(response[2], 'a');
+    REQUIRE_EQ(response[3], 0x00);
+    REQUIRE_EQ(response[4], (uint8_t)command_1);
+    REQUIRE_EQ(response[5], (uint8_t)command_2);
+    REQUIRE(std::memcmp(&response[6], values, 8) == 0);
+    REQUIRE_EQ(response[14], '\\');
+}
+
+static void test_display_interval_exact_frames_and_updates(void)
+{
+    reset_state();
+
+    require_interval_response(dispatch(make_li()), 'l', 'i', "00030021");
+    REQUIRE_EQ(protocol_test_mode_reset_count(), 0);
+
+    require_interval_response(dispatch(make_ci(1, 3600)),
+                              'c',
+                              'i',
+                              "00013600");
+    clock_mode_intervals_t active = protocol_test_intervals();
+    REQUIRE_EQ(active.logo_seconds, 1);
+    REQUIRE_EQ(active.mode_seconds, 3600);
+    REQUIRE_EQ(protocol_test_interval_save_count(), 1);
+    REQUIRE_EQ(protocol_test_mode_reset_count(), 1);
+
+    require_interval_response(dispatch(make_di()), 'd', 'i', "00030021");
+    active = protocol_test_intervals();
+    REQUIRE_EQ(active.logo_seconds, 3);
+    REQUIRE_EQ(active.mode_seconds, 21);
+    REQUIRE_EQ(protocol_test_interval_restore_count(), 1);
+    REQUIRE_EQ(protocol_test_mode_reset_count(), 2);
+}
+
+static void test_display_interval_validation_is_atomic(void)
+{
+    reset_state();
+
+    const std::vector<std::vector<uint8_t>> invalid_requests = {
+        make_ci(0, 21),
+        make_ci(3, 0),
+        make_ci(3601, 21),
+        make_ci(3, 3601),
+    };
+
+    for (const auto &request : invalid_requests) {
+        int result = 0;
+        REQUIRE(dispatch(request, &result).empty());
+        REQUIRE_EQ(result, -1);
+        const clock_mode_intervals_t active = protocol_test_intervals();
+        REQUIRE_EQ(active.logo_seconds, 3);
+        REQUIRE_EQ(active.mode_seconds, 21);
+    }
+
+    std::vector<uint8_t> non_decimal = make_ci(3, 21);
+    non_decimal[9] = 'X';
+    REQUIRE(dispatch(non_decimal).empty());
+
+    std::vector<uint8_t> wrong_length = make_ci(3, 21);
+    wrong_length.erase(wrong_length.begin() + 10);
+    REQUIRE(dispatch(wrong_length).empty());
+
+    std::vector<uint8_t> wrong_board = make_ci(3, 21);
+    wrong_board[3] = 1;
+    REQUIRE(dispatch(wrong_board).empty());
+
+    REQUIRE_EQ(protocol_test_interval_save_count(), 0);
+    REQUIRE_EQ(protocol_test_mode_reset_count(), 0);
+}
+
+static void test_display_interval_persistence_failure_has_no_success(void)
+{
+    reset_state();
+    protocol_test_set_interval_save_result(ESP_FAIL);
+
+    int result = 0;
+    REQUIRE(dispatch(make_ci(9, 30), &result).empty());
+    REQUIRE_EQ(result, -1);
+    const clock_mode_intervals_t active = protocol_test_intervals();
+    REQUIRE_EQ(active.logo_seconds, 3);
+    REQUIRE_EQ(active.mode_seconds, 21);
+    REQUIRE_EQ(protocol_test_mode_reset_count(), 0);
+}
+
+static void test_factory_reset_restores_display_intervals(void)
+{
+    reset_state();
+    REQUIRE(!dispatch(make_ci(8, 40)).empty());
+    std::vector<uint8_t> request = {
+        '/', 'T', 'A', 0, 'R', 'T', 0, '\\'
+    };
+    int result = -1;
+    REQUIRE(dispatch(request, &result).empty());
+    REQUIRE_EQ(result, 0);
+    const clock_mode_intervals_t active = protocol_test_intervals();
+    REQUIRE_EQ(active.logo_seconds, 3);
+    REQUIRE_EQ(active.mode_seconds, 21);
+    REQUIRE_EQ(protocol_test_interval_restore_count(), 1);
+}
+
 typedef struct {
     std::vector<std::vector<uint8_t>> frames;
     std::vector<std::vector<uint8_t>> responses;
@@ -810,6 +954,43 @@ static void test_stream_overflow_and_recovery(void)
     REQUIRE_EQ(response_status(capture.responses.back()), 0x00);
 }
 
+static void test_display_interval_stream_fragmented_and_coalesced(void)
+{
+    reset_state();
+    clock_protocol_stream_t stream = {};
+    clock_protocol_stream_init(&stream);
+    stream_capture_t capture;
+    const std::vector<uint8_t> ci = make_ci(7, 44);
+
+    clock_protocol_stream_result_t result =
+        clock_protocol_stream_consume(&stream,
+                                      ci.data(),
+                                      9,
+                                      capture_frame,
+                                      &capture);
+    REQUIRE_EQ(result.frames_dispatched, 0u);
+
+    result = clock_protocol_stream_consume(&stream,
+                                           ci.data() + 9,
+                                           ci.size() - 9,
+                                           capture_frame,
+                                           &capture);
+    REQUIRE_EQ(result.frames_dispatched, 1u);
+    require_interval_response(capture.responses[0], 'c', 'i', "00070044");
+
+    std::vector<uint8_t> combined = make_li();
+    const std::vector<uint8_t> di = make_di();
+    combined.insert(combined.end(), di.begin(), di.end());
+    result = clock_protocol_stream_consume(&stream,
+                                           combined.data(),
+                                           combined.size(),
+                                           capture_frame,
+                                           &capture);
+    REQUIRE_EQ(result.frames_dispatched, 2u);
+    require_interval_response(capture.responses[1], 'l', 'i', "00070044");
+    require_interval_response(capture.responses[2], 'd', 'i', "00030021");
+}
+
 static void test_stream_keep_alive(void)
 {
     reset_state();
@@ -888,12 +1069,22 @@ int main(void)
     run_test(test_rm_reports_modes_without_side_effects, "RM modes 1 through 4");
     run_test(test_rm_internal_failure_and_board_validation,
              "RM internal failure and board validation");
+    run_test(test_display_interval_exact_frames_and_updates,
+             "display interval exact frames and updates");
+    run_test(test_display_interval_validation_is_atomic,
+             "display interval atomic validation");
+    run_test(test_display_interval_persistence_failure_has_no_success,
+             "display interval persistence failure");
+    run_test(test_factory_reset_restores_display_intervals,
+             "factory reset display intervals");
     run_test(test_stream_fragmentation_and_partial_wait, "stream fragmentation");
     run_test(test_stream_coalesced_and_multiple_frames, "stream coalescing");
     run_test(test_sm_stream_fragmented_and_coalesced,
              "SM stream fragmentation and coalescing");
     run_test(test_rm_stream_fragmented_and_coalesced,
              "RM stream fragmentation and coalescing");
+    run_test(test_display_interval_stream_fragmented_and_coalesced,
+             "display interval stream fragmentation and coalescing");
     run_test(test_stream_overflow_and_recovery, "stream overflow recovery");
     run_test(test_stream_keep_alive, "stream keep-alive");
     run_test(test_stream_preserves_legacy_raw_delimiter_payload,
