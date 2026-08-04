@@ -553,17 +553,7 @@ void clock_display_draw_mode_2(Hub75Driver *driver,
 	                     time_color.b);
 	 }
 
-    /*
-     * Temperature at lower-right.
-     *
-     * Old behavior:
-     * draw_text_6(50, 26, buf_temp, ...)
-     * draw_text_4(57, 26, "#", ...)
-     * draw_text_6(60, 26, "$", ...)
-     *
-     * If your font already has '*' as degree symbol and C as normal C,
-     * just draw "%d*C".
-     */
+
     make_temp_text(buf_temp,
                    sizeof(buf_temp),
                    temp_c,
@@ -777,17 +767,3 @@ void clock_display_draw_startup(Hub75Driver *driver,
     draw_string_5x7(*driver, clock_display_center_x_5x7(line4), 24, line4, 255, 255, 0);
 }
 
-
-
-//==== mode 1 test===
-/*
-if (format == FORMAT_12H) {
-    if (time->hour >= 12) {
-        draw_string(*driver, 51, 22, "PM", 255, 255, 255);
-    } else {
-        draw_string(*driver, 51, 22, "AM", 255, 255, 255);
-    }
-} else {
-    draw_string(*driver, 51, 22, "24", 255, 255, 255);
-}
-*/
