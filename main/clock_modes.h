@@ -6,8 +6,8 @@
 
 #define CLOCK_DEFAULT_LOGO_INTERVAL_SECONDS ((uint16_t)3)
 #define CLOCK_DEFAULT_MODE_INTERVAL_SECONDS ((uint16_t)21)
-#define CLOCK_MIN_DISPLAY_INTERVAL_SECONDS ((uint16_t)1)
-#define CLOCK_MAX_DISPLAY_INTERVAL_SECONDS ((uint16_t)3600)
+#define CLOCK_MODE_INTERVAL_MIN_SECONDS ((uint16_t)1)
+#define CLOCK_MODE_INTERVAL_MAX_SECONDS ((uint16_t)9999)
 
 typedef struct {
     uint16_t logo_seconds;

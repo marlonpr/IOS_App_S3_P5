@@ -670,13 +670,13 @@ static void test_display_interval_exact_frames_and_updates(void)
     require_interval_response(dispatch(make_li()), 'l', 'i', "00030021");
     REQUIRE_EQ(protocol_test_mode_reset_count(), 0);
 
-    require_interval_response(dispatch(make_ci(1, 3600)),
+    require_interval_response(dispatch(make_ci(9999, 9999)),
                               'c',
                               'i',
-                              "00013600");
+                              "99999999");
     clock_mode_intervals_t active = protocol_test_intervals();
-    REQUIRE_EQ(active.logo_seconds, 1);
-    REQUIRE_EQ(active.mode_seconds, 3600);
+    REQUIRE_EQ(active.logo_seconds, 9999);
+    REQUIRE_EQ(active.mode_seconds, 9999);
     REQUIRE_EQ(protocol_test_interval_save_count(), 1);
     REQUIRE_EQ(protocol_test_mode_reset_count(), 1);
 
@@ -695,8 +695,8 @@ static void test_display_interval_validation_is_atomic(void)
     const std::vector<std::vector<uint8_t>> invalid_requests = {
         make_ci(0, 21),
         make_ci(3, 0),
-        make_ci(3601, 21),
-        make_ci(3, 3601),
+        make_ci(10000, 21),
+        make_ci(3, 10000),
     };
 
     for (const auto &request : invalid_requests) {
@@ -715,6 +715,15 @@ static void test_display_interval_validation_is_atomic(void)
     std::vector<uint8_t> wrong_length = make_ci(3, 21);
     wrong_length.erase(wrong_length.begin() + 10);
     REQUIRE(dispatch(wrong_length).empty());
+
+    std::vector<uint8_t> five_digit = make_request_prefix('C', 'I');
+    const char five_digit_payload[] = "100000021";
+    five_digit.insert(five_digit.end(),
+                      five_digit_payload,
+                      five_digit_payload + sizeof(five_digit_payload) - 1);
+    five_digit.push_back('\\');
+    REQUIRE_EQ(five_digit.size(), 16u);
+    REQUIRE(dispatch(five_digit).empty());
 
     std::vector<uint8_t> wrong_board = make_ci(3, 21);
     wrong_board[3] = 1;

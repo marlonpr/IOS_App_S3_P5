@@ -93,10 +93,10 @@ bool clock_modes_validate_intervals(const clock_mode_intervals_t *intervals)
         return false;
     }
 
-    return intervals->logo_seconds >= CLOCK_MIN_DISPLAY_INTERVAL_SECONDS &&
-           intervals->logo_seconds <= CLOCK_MAX_DISPLAY_INTERVAL_SECONDS &&
-           intervals->mode_seconds >= CLOCK_MIN_DISPLAY_INTERVAL_SECONDS &&
-           intervals->mode_seconds <= CLOCK_MAX_DISPLAY_INTERVAL_SECONDS;
+    return intervals->logo_seconds >= CLOCK_MODE_INTERVAL_MIN_SECONDS &&
+           intervals->logo_seconds <= CLOCK_MODE_INTERVAL_MAX_SECONDS &&
+           intervals->mode_seconds >= CLOCK_MODE_INTERVAL_MIN_SECONDS &&
+           intervals->mode_seconds <= CLOCK_MODE_INTERVAL_MAX_SECONDS;
 }
 
 clock_mode_intervals_t clock_modes_get_intervals(void)

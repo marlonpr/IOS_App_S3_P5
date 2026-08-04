@@ -52,11 +52,11 @@ void test_defaults_and_validation(void)
     require_intervals(3, 21);
 
     const clock_mode_intervals_t minimum = {1, 1};
-    const clock_mode_intervals_t maximum = {3600, 3600};
+    const clock_mode_intervals_t maximum = {9999, 9999};
     const clock_mode_intervals_t zero_logo = {0, 21};
     const clock_mode_intervals_t zero_mode = {3, 0};
-    const clock_mode_intervals_t high_logo = {3601, 21};
-    const clock_mode_intervals_t high_mode = {3, 3601};
+    const clock_mode_intervals_t high_logo = {10000, 21};
+    const clock_mode_intervals_t high_mode = {3, 10000};
     REQUIRE(clock_modes_validate_intervals(&minimum));
     REQUIRE(clock_modes_validate_intervals(&maximum));
     REQUIRE(!clock_modes_validate_intervals(&zero_logo));
@@ -125,8 +125,8 @@ void test_invalid_set_rejects_pair_atomically(void)
     const clock_mode_intervals_t invalid_pairs[] = {
         {0, 21},
         {3, 0},
-        {3601, 21},
-        {3, 3601},
+        {10000, 21},
+        {3, 10000},
     };
 
     for (const auto &invalid : invalid_pairs) {
@@ -157,7 +157,7 @@ void test_missing_corrupt_and_out_of_range_nvs_use_pair_defaults(void)
     require_intervals(3, 21);
 
     interval_test_reset_environment();
-    interval_test_store_u16("logo_sec", 3601);
+    interval_test_store_u16("logo_sec", 10000);
     interval_test_store_u16("mode_sec", 50);
     REQUIRE_EQ(clock_modes_init_intervals(), ESP_OK);
     require_intervals(3, 21);
@@ -166,10 +166,10 @@ void test_missing_corrupt_and_out_of_range_nvs_use_pair_defaults(void)
 void test_persisted_values_reload_and_restore_defaults(void)
 {
     reset_with_missing_nvs();
-    const clock_mode_intervals_t custom = {17, 99};
+    const clock_mode_intervals_t custom = {9999, 9999};
     REQUIRE_EQ(clock_modes_set_intervals(&custom), ESP_OK);
     REQUIRE_EQ(clock_modes_init_intervals(), ESP_OK);
-    require_intervals(17, 99);
+    require_intervals(9999, 9999);
 
     interval_test_reset_counters();
     REQUIRE_EQ(clock_modes_restore_default_intervals(), ESP_OK);
