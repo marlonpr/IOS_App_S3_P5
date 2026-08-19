@@ -5,6 +5,7 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
+#include "freertos/portmacro.h"
 #include "freertos/task.h"
 
 #include "esp_log.h"
@@ -50,13 +51,25 @@ static const char *TAG = "CLOCK_ETHERNET";
 #define TCP_SERVER_PORT    5000
 
 static constexpr EventBits_t ETH_GOT_IP_BIT = BIT0;
+static constexpr EventBits_t ETH_ATTEMPT_FAILED_BIT = BIT1;
+static constexpr EventBits_t ETH_STARTED_BIT = BIT2;
 
 static esp_eth_handle_t s_eth_handle = NULL;
 static esp_netif_t *s_eth_netif = NULL;
 static EventGroupHandle_t s_eth_events = NULL;
 
 static bool s_use_static_ip = true;
+static bool s_initialized = false;
 static clock_ethernet_rx_callback_t s_rx_callback = NULL;
+static clock_network_interface_event_callback_t s_event_callback = NULL;
+static void *s_event_context = NULL;
+
+static portMUX_TYPE s_tcp_state_lock = portMUX_INITIALIZER_UNLOCKED;
+static bool s_tcp_task_running = false;
+static bool s_tcp_desired = false;
+static uint32_t s_tcp_generation = 0;
+static int s_tcp_listen_sock = -1;
+static int s_tcp_client_sock = -1;
 
 #define CLOCK_ETH_RETURN_ON_ERROR(expression)                              \
     do {                                                                   \
@@ -70,6 +83,14 @@ static clock_ethernet_rx_callback_t s_rx_callback = NULL;
 
 // ================= EVENTS =================
 
+static void notify_network(clock_network_interface_event_t event,
+                           uint32_t detail = 0)
+{
+    if (s_event_callback != NULL) {
+        s_event_callback(event, detail, s_event_context);
+    }
+}
+
 static void eth_event_handler(void *arg,
                               esp_event_base_t event_base,
                               int32_t event_id,
@@ -78,24 +99,38 @@ static void eth_event_handler(void *arg,
     switch (event_id) {
         case ETHERNET_EVENT_CONNECTED:
             ESP_LOGI(TAG, "Ethernet Link Up");
+            if (s_eth_events != NULL) {
+                xEventGroupClearBits(s_eth_events, ETH_ATTEMPT_FAILED_BIT);
+            }
+            notify_network(CLOCK_NETWORK_INTERFACE_EVENT_LINK_UP);
             break;
 
         case ETHERNET_EVENT_DISCONNECTED:
             ESP_LOGW(TAG, "Ethernet Link Down");
             if (s_eth_events != NULL) {
                 xEventGroupClearBits(s_eth_events, ETH_GOT_IP_BIT);
+                xEventGroupSetBits(s_eth_events, ETH_ATTEMPT_FAILED_BIT);
             }
+            notify_network(CLOCK_NETWORK_INTERFACE_EVENT_DISCONNECTED);
             break;
 
         case ETHERNET_EVENT_START:
             ESP_LOGI(TAG, "Ethernet Started");
+            if (s_eth_events != NULL) {
+                xEventGroupClearBits(s_eth_events, ETH_ATTEMPT_FAILED_BIT);
+                xEventGroupSetBits(s_eth_events, ETH_STARTED_BIT);
+            }
+            notify_network(CLOCK_NETWORK_INTERFACE_EVENT_STARTED);
             break;
 
         case ETHERNET_EVENT_STOP:
             ESP_LOGI(TAG, "Ethernet Stopped");
             if (s_eth_events != NULL) {
-                xEventGroupClearBits(s_eth_events, ETH_GOT_IP_BIT);
+                xEventGroupClearBits(s_eth_events,
+                                     ETH_STARTED_BIT | ETH_GOT_IP_BIT);
+                xEventGroupSetBits(s_eth_events, ETH_ATTEMPT_FAILED_BIT);
             }
+            notify_network(CLOCK_NETWORK_INTERFACE_EVENT_STOPPED);
             break;
 
         default:
@@ -109,13 +144,29 @@ static void got_ip_event_handler(
     int32_t event_id,
     void *event_data)
 {
-    if (event_base != IP_EVENT ||
-        event_id != IP_EVENT_ETH_GOT_IP) {
+    if (event_base != IP_EVENT) {
+        return;
+    }
+
+    if (event_id == IP_EVENT_ETH_LOST_IP) {
+        if (s_eth_events != NULL) {
+            xEventGroupClearBits(s_eth_events, ETH_GOT_IP_BIT);
+            xEventGroupSetBits(s_eth_events, ETH_ATTEMPT_FAILED_BIT);
+        }
+        ESP_LOGW(TAG, "Ethernet lost its local IP address");
+        notify_network(CLOCK_NETWORK_INTERFACE_EVENT_LOST_IP);
+        return;
+    }
+
+    if (event_id != IP_EVENT_ETH_GOT_IP) {
         return;
     }
 
     auto *event =
         static_cast<ip_event_got_ip_t *>(event_data);
+    if (event == NULL) {
+        return;
+    }
 
     const esp_netif_ip_info_t *ip_info =
         &event->ip_info;
@@ -141,7 +192,10 @@ static void got_ip_event_handler(
     }
 
     if (s_eth_events != NULL && ip_info->ip.addr != 0) {
+        xEventGroupClearBits(s_eth_events, ETH_ATTEMPT_FAILED_BIT);
         xEventGroupSetBits(s_eth_events, ETH_GOT_IP_BIT);
+        notify_network(CLOCK_NETWORK_INTERFACE_EVENT_GOT_IP,
+                       ip_info->ip.addr);
     }
 }
 
@@ -297,8 +351,103 @@ static void dispatch_protocol_frame(const uint8_t *frame,
     }
 }
 
+static bool tcp_generation_is_current(uint32_t generation)
+{
+    portENTER_CRITICAL(&s_tcp_state_lock);
+    const bool current = s_tcp_desired && s_tcp_task_running &&
+                         generation == s_tcp_generation;
+    portEXIT_CRITICAL(&s_tcp_state_lock);
+    return current;
+}
+
+static bool tcp_publish_socket(uint32_t generation,
+                               int socket_fd,
+                               bool listener)
+{
+    portENTER_CRITICAL(&s_tcp_state_lock);
+    const bool current = s_tcp_desired && s_tcp_task_running &&
+                         generation == s_tcp_generation;
+    if (current) {
+        if (listener) {
+            s_tcp_listen_sock = socket_fd;
+        } else {
+            s_tcp_client_sock = socket_fd;
+        }
+    }
+    portEXIT_CRITICAL(&s_tcp_state_lock);
+    return current;
+}
+
+static bool tcp_release_socket(uint32_t generation,
+                               int socket_fd,
+                               bool listener)
+{
+    bool owned = false;
+    portENTER_CRITICAL(&s_tcp_state_lock);
+    if (generation == s_tcp_generation) {
+        int *published = listener ? &s_tcp_listen_sock : &s_tcp_client_sock;
+        if (*published == socket_fd) {
+            *published = -1;
+            owned = true;
+        }
+    }
+    portEXIT_CRITICAL(&s_tcp_state_lock);
+    return owned;
+}
+
+static void tcp_finish_task(uint32_t generation,
+                            int listen_sock,
+                            int client_sock)
+{
+    const bool close_client = client_sock >= 0 &&
+                              tcp_release_socket(generation,
+                                                 client_sock,
+                                                 false);
+    const bool close_listener = listen_sock >= 0 &&
+                                tcp_release_socket(generation,
+                                                   listen_sock,
+                                                   true);
+
+    if (close_client) {
+        shutdown(client_sock, SHUT_RDWR);
+        close(client_sock);
+    }
+    if (close_listener) {
+        shutdown(listen_sock, SHUT_RDWR);
+        close(listen_sock);
+    }
+
+    portENTER_CRITICAL(&s_tcp_state_lock);
+    s_tcp_task_running = false;
+    if (generation == s_tcp_generation) {
+        s_tcp_desired = false;
+    }
+    portEXIT_CRITICAL(&s_tcp_state_lock);
+}
+
+static void configure_tcp_keepalive(int socket_fd)
+{
+    int enable = 1;
+    int idle_seconds = 60;
+    int interval_seconds = 15;
+    int probe_count = 4;
+
+    if (setsockopt(socket_fd, SOL_SOCKET, SO_KEEPALIVE,
+                   &enable, sizeof(enable)) != 0 ||
+        setsockopt(socket_fd, IPPROTO_TCP, TCP_KEEPIDLE,
+                   &idle_seconds, sizeof(idle_seconds)) != 0 ||
+        setsockopt(socket_fd, IPPROTO_TCP, TCP_KEEPINTVL,
+                   &interval_seconds, sizeof(interval_seconds)) != 0 ||
+        setsockopt(socket_fd, IPPROTO_TCP, TCP_KEEPCNT,
+                   &probe_count, sizeof(probe_count)) != 0) {
+        ESP_LOGW(TAG, "TCP keepalive configuration failed: errno %d", errno);
+    }
+}
+
 static void tcp_server_task(void *pvParameters)
 {
+    const uint32_t generation =
+        static_cast<uint32_t>(reinterpret_cast<uintptr_t>(pvParameters));
     uint8_t rx_buffer[CLOCK_PROTOCOL_STREAM_CAPACITY];
 
     struct sockaddr_in server_addr = {};
@@ -309,6 +458,14 @@ static void tcp_server_task(void *pvParameters)
     int listen_sock = socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
     if (listen_sock < 0) {
         ESP_LOGE(TAG, "Unable to create TCP socket: errno %d", errno);
+        tcp_finish_task(generation, -1, -1);
+        vTaskDelete(NULL);
+        return;
+    }
+
+    if (!tcp_publish_socket(generation, listen_sock, true)) {
+        close(listen_sock);
+        tcp_finish_task(generation, -1, -1);
         vTaskDelete(NULL);
         return;
     }
@@ -321,23 +478,27 @@ static void tcp_server_task(void *pvParameters)
                    sizeof(server_addr));
 
     if (err != 0) {
-        ESP_LOGE(TAG, "Socket bind failed: errno %d", errno);
-        close(listen_sock);
+        if (tcp_generation_is_current(generation)) {
+            ESP_LOGE(TAG, "Socket bind failed: errno %d", errno);
+        }
+        tcp_finish_task(generation, listen_sock, -1);
         vTaskDelete(NULL);
         return;
     }
 
     err = listen(listen_sock, 1);
     if (err != 0) {
-        ESP_LOGE(TAG, "Socket listen failed: errno %d", errno);
-        close(listen_sock);
+        if (tcp_generation_is_current(generation)) {
+            ESP_LOGE(TAG, "Socket listen failed: errno %d", errno);
+        }
+        tcp_finish_task(generation, listen_sock, -1);
         vTaskDelete(NULL);
         return;
     }
 
     ESP_LOGI(TAG, "TCP server listening on port %d", TCP_SERVER_PORT);
 
-    while (true) {
+    while (tcp_generation_is_current(generation)) {
         struct sockaddr_in client_addr = {};
         socklen_t client_addr_len = sizeof(client_addr);
 
@@ -348,9 +509,20 @@ static void tcp_server_task(void *pvParameters)
                                  &client_addr_len);
 
         if (client_sock < 0) {
+            if (!tcp_generation_is_current(generation)) {
+                break;
+            }
             ESP_LOGE(TAG, "Unable to accept connection: errno %d", errno);
             continue;
         }
+
+        if (!tcp_publish_socket(generation, client_sock, false)) {
+            shutdown(client_sock, SHUT_RDWR);
+            close(client_sock);
+            break;
+        }
+
+        configure_tcp_keepalive(client_sock);
 
         ESP_LOGI(TAG,
                  "TCP client connected from %s:%d",
@@ -368,7 +540,7 @@ static void tcp_server_task(void *pvParameters)
             .client_sock = client_sock,
         };
 
-        while (true) {
+        while (tcp_generation_is_current(generation)) {
             int len = recv(client_sock,
                            rx_buffer,
                            sizeof(rx_buffer),
@@ -399,15 +571,42 @@ static void tcp_server_task(void *pvParameters)
             }
         }
 
-        shutdown(client_sock, 0);
-        close(client_sock);
+        if (tcp_release_socket(generation, client_sock, false)) {
+            shutdown(client_sock, SHUT_RDWR);
+            close(client_sock);
+        }
     }
+
+    tcp_finish_task(generation, listen_sock, -1);
+    vTaskDelete(NULL);
 }
 
 // ================= INIT =================
 
 static esp_err_t clock_ethernet_init_common(bool use_static_ip)
 {
+    if (s_initialized) {
+        if (s_use_static_ip != use_static_ip) {
+            ESP_LOGE(TAG, "Cannot change Ethernet IP mode without reinitializing");
+            return ESP_ERR_INVALID_STATE;
+        }
+
+        xEventGroupClearBits(s_eth_events,
+                             ETH_GOT_IP_BIT | ETH_ATTEMPT_FAILED_BIT);
+
+        if ((xEventGroupGetBits(s_eth_events) & ETH_STARTED_BIT) != 0) {
+            const esp_err_t stop_result = esp_eth_stop(s_eth_handle);
+            if (stop_result != ESP_OK) {
+                ESP_LOGW(TAG, "Ethernet recovery stop failed: %s",
+                         esp_err_to_name(stop_result));
+                return stop_result;
+            }
+        }
+
+        ESP_LOGI(TAG, "Restarting W5500 for another connection attempt");
+        return esp_eth_start(s_eth_handle);
+    }
+
     s_use_static_ip = use_static_ip;
 
 	ESP_LOGI(TAG, "Initializing W5500 Ethernet");
@@ -553,13 +752,18 @@ if (isr_ret != ESP_OK && isr_ret != ESP_ERR_INVALID_STATE) {
                                                          NULL));
 
     CLOCK_ETH_RETURN_ON_ERROR(esp_event_handler_register(IP_EVENT,
-                                                         IP_EVENT_ETH_GOT_IP,
+                                                         ESP_EVENT_ANY_ID,
                                                          &got_ip_event_handler,
                                                          NULL));
 
-    CLOCK_ETH_RETURN_ON_ERROR(esp_eth_start(s_eth_handle));
-
-    ESP_LOGI(TAG, "W5500 Ethernet init done");
+    s_initialized = true;
+    const esp_err_t start_result = esp_eth_start(s_eth_handle);
+    if (start_result != ESP_OK) {
+        ESP_LOGE(TAG, "esp_eth_start failed: %s",
+                 esp_err_to_name(start_result));
+        return start_result;
+    }
+	ESP_LOGI(TAG, "W5500 Ethernet init done");
 
     return ESP_OK;
 }
@@ -582,14 +786,18 @@ bool clock_ethernet_wait_for_ip(uint32_t timeout_ms)
 
     const EventBits_t bits = xEventGroupWaitBits(
         s_eth_events,
-        ETH_GOT_IP_BIT,
+        ETH_GOT_IP_BIT | ETH_ATTEMPT_FAILED_BIT,
         pdFALSE,
         pdFALSE,
         pdMS_TO_TICKS(timeout_ms));
 
     if ((bits & ETH_GOT_IP_BIT) == 0) {
-        ESP_LOGW(TAG, "Ethernet connection timed out after %u ms",
-                 static_cast<unsigned>(timeout_ms));
+        if ((bits & ETH_ATTEMPT_FAILED_BIT) != 0) {
+            ESP_LOGW(TAG, "Ethernet attempt ended without a local IP");
+        } else {
+            ESP_LOGW(TAG, "Ethernet connection timed out after %u ms",
+                     static_cast<unsigned>(timeout_ms));
+        }
         return false;
     }
 
@@ -622,7 +830,8 @@ esp_err_t clock_ethernet_stop(void)
     }
 
     if (s_eth_events != NULL) {
-        xEventGroupClearBits(s_eth_events, ETH_GOT_IP_BIT);
+        xEventGroupClearBits(s_eth_events,
+                             ETH_GOT_IP_BIT | ETH_ATTEMPT_FAILED_BIT);
     }
 
     const esp_err_t result = esp_eth_stop(s_eth_handle);
@@ -632,24 +841,106 @@ esp_err_t clock_ethernet_stop(void)
     return result;
 }
 
+void clock_ethernet_set_event_callback(
+    clock_network_interface_event_callback_t callback,
+    void *context)
+{
+    s_event_callback = callback;
+    s_event_context = context;
+}
+
 esp_err_t clock_ethernet_start_tcp_server(clock_ethernet_rx_callback_t rx_callback)
 {
+    if (rx_callback == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
     s_rx_callback = rx_callback;
+
+    portENTER_CRITICAL(&s_tcp_state_lock);
+    if (s_tcp_task_running || s_tcp_desired) {
+        const bool current_listener = s_tcp_desired;
+        portEXIT_CRITICAL(&s_tcp_state_lock);
+        if (current_listener) {
+            ESP_LOGI(TAG, "TCP server already running; duplicate start ignored");
+            return ESP_OK;
+        }
+        ESP_LOGW(TAG, "Previous TCP server generation is still stopping");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    ++s_tcp_generation;
+    const uint32_t generation = s_tcp_generation;
+    s_tcp_desired = true;
+    s_tcp_task_running = true;
+    s_tcp_listen_sock = -1;
+    s_tcp_client_sock = -1;
+    portEXIT_CRITICAL(&s_tcp_state_lock);
 
     BaseType_t ret = xTaskCreatePinnedToCore(
         tcp_server_task,
         "TcpServerTask",
         4096,
-        NULL,
+        reinterpret_cast<void *>(static_cast<uintptr_t>(generation)),
         4,
         NULL,
         0
     );
 
     if (ret != pdPASS) {
+        portENTER_CRITICAL(&s_tcp_state_lock);
+        if (generation == s_tcp_generation) {
+            s_tcp_desired = false;
+            s_tcp_task_running = false;
+        }
+        portEXIT_CRITICAL(&s_tcp_state_lock);
         ESP_LOGE(TAG, "Failed to create TCP server task");
         return ESP_FAIL;
     }
 
     return ESP_OK;
+}
+
+esp_err_t clock_ethernet_stop_tcp_server(void)
+{
+    int listen_sock = -1;
+    int client_sock = -1;
+
+    portENTER_CRITICAL(&s_tcp_state_lock);
+    if (!s_tcp_task_running && !s_tcp_desired) {
+        portEXIT_CRITICAL(&s_tcp_state_lock);
+        return ESP_OK;
+    }
+
+    s_tcp_desired = false;
+    ++s_tcp_generation;
+    listen_sock = s_tcp_listen_sock;
+    client_sock = s_tcp_client_sock;
+    s_tcp_listen_sock = -1;
+    s_tcp_client_sock = -1;
+    portEXIT_CRITICAL(&s_tcp_state_lock);
+
+    if (client_sock >= 0) {
+        shutdown(client_sock, SHUT_RDWR);
+        close(client_sock);
+    }
+    if (listen_sock >= 0) {
+        shutdown(listen_sock, SHUT_RDWR);
+        close(listen_sock);
+    }
+
+    for (uint32_t waited_ms = 0; waited_ms < 1000; waited_ms += 10) {
+        portENTER_CRITICAL(&s_tcp_state_lock);
+        const bool running = s_tcp_task_running;
+        portEXIT_CRITICAL(&s_tcp_state_lock);
+
+        if (!running) {
+            ESP_LOGI(TAG, "TCP listener and client sockets invalidated");
+            return ESP_OK;
+        }
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+
+    ESP_LOGW(TAG, "Timed out waiting for TCP server task to stop");
+    return ESP_ERR_TIMEOUT;
 }

@@ -2,8 +2,11 @@
 
 #include <stdio.h>
 
+#include "esp_timer.h"
 #include "led_panel.h"
 #include "clock_logo_manager.h"
+#include "clock_network.h"
+#include "clock_network_indicator.h"
 #include "clock_palette.h"
 
 // =============================== DATE TEXT ===============================
@@ -330,7 +333,7 @@ void clock_display_draw_mode_1(Hub75Driver *driver,
 
     draw_string(*driver,
                 4,
-                1,
+                2,
                 line1,
                 time_color.r,
                 time_color.g,
@@ -410,7 +413,7 @@ void clock_display_draw_mode_2(Hub75Driver *driver,
 	                                    sizeof(date_scroll_text));
 
 	scroll_start_if_needed(date_scroll_text,
-	                       2,
+	                       3,
 	                       date_color.r,
 	                       date_color.g,
 	                       date_color.b,
@@ -630,7 +633,7 @@ void clock_display_draw_mode_3(Hub75Driver *driver,
 
     draw_string(*driver,
                 1 + pos_day,
-                1,
+                2,
                 buf_day,
                 weekday_color.r,
                 weekday_color.g,
@@ -647,7 +650,7 @@ void clock_display_draw_mode_3(Hub75Driver *driver,
 
     draw_string(*driver,
                 4,
-                11,
+                12,
                 buf_date,
                 date_color.r,
                 date_color.g,
@@ -739,6 +742,30 @@ void clock_display_draw_logo(Hub75Driver *driver)
     clock_logo_unlock_pixels();
 }
 
+void clock_display_draw_network_status_overlay(Hub75Driver *driver)
+{
+    if (driver == nullptr) {
+        return;
+    }
+
+    clock_network_indicator_pixel_t pixels[CLOCK_NETWORK_INDICATOR_PIXEL_COUNT];
+    const size_t pixel_count = clock_network_indicator_build_pixels(
+        driver->get_width(),
+        driver->get_height(),
+        clock_network_get_status(),
+        esp_timer_get_time(),
+        pixels,
+        CLOCK_NETWORK_INDICATOR_PIXEL_COUNT);
+
+    for (size_t index = 0; index < pixel_count; ++index) {
+        driver->set_pixel(pixels[index].x,
+                          pixels[index].y,
+                          pixels[index].red,
+                          pixels[index].green,
+                          pixels[index].blue);
+    }
+}
+
 void clock_display_draw_startup(Hub75Driver *driver,
                                 int display_mode,
                                 int brightness_level,
@@ -766,4 +793,3 @@ void clock_display_draw_startup(Hub75Driver *driver,
     draw_string_5x7(*driver, clock_display_center_x_5x7(line3), 16, line3, 0, 255, 255);
     draw_string_5x7(*driver, clock_display_center_x_5x7(line4), 24, line4, 255, 255, 0);
 }
-

@@ -23,6 +23,27 @@ typedef enum {
     CLOCK_NETWORK_INTERFACE_WIFI = 2,
 } clock_network_interface_t;
 
+typedef enum {
+    CLOCK_NETWORK_OFFLINE = 0,
+    CLOCK_NETWORK_CONNECTING = 1,
+    CLOCK_NETWORK_ONLINE = 2,
+} clock_network_status_t;
+
+#define CLOCK_NETWORK_RETRY_SLOT_MS (20UL * 1000UL)
+#define CLOCK_NETWORK_ATTEMPTS_PER_BURST 4U
+#define CLOCK_NETWORK_COOLDOWN_MS (5UL * 60UL * 1000UL)
+#define CLOCK_NETWORK_FINAL_ATTEMPT_START_MS                         \
+    (CLOCK_NETWORK_RETRY_SLOT_MS *                                  \
+     (CLOCK_NETWORK_ATTEMPTS_PER_BURST - 1U))
+
+typedef struct {
+    clock_network_status_t status;
+    uint8_t attempt;
+    bool attempt_complete;
+    uint64_t burst_started_ms;
+    uint64_t next_action_ms;
+} clock_network_retry_state_t;
+
 typedef struct {
     bool started;
 } clock_network_service_guard_t;
@@ -72,6 +93,27 @@ bool clock_network_long_hold_update(clock_network_long_hold_t *state,
                                     bool pressed,
                                     uint32_t held_ms);
 
+void clock_network_retry_state_init(clock_network_retry_state_t *state,
+                                    uint64_t now_ms);
+void clock_network_retry_start_burst(clock_network_retry_state_t *state,
+                                     uint64_t now_ms);
+bool clock_network_retry_attempt_is_due(
+    const clock_network_retry_state_t *state,
+    uint64_t now_ms);
+uint8_t clock_network_retry_begin_attempt(clock_network_retry_state_t *state);
+void clock_network_retry_attempt_failed(clock_network_retry_state_t *state);
+bool clock_network_retry_burst_is_exhausted(
+    const clock_network_retry_state_t *state,
+    uint64_t now_ms);
+void clock_network_retry_enter_cooldown(clock_network_retry_state_t *state,
+                                        uint64_t now_ms);
+bool clock_network_retry_cooldown_is_expired(
+    const clock_network_retry_state_t *state,
+    uint64_t now_ms);
+void clock_network_retry_connected(clock_network_retry_state_t *state);
+void clock_network_retry_disconnected(clock_network_retry_state_t *state,
+                                      uint64_t now_ms);
+
 esp_err_t clock_network_cycle_saved_mode(
     clock_network_mode_t current_mode,
     clock_network_save_mode_callback_t save_callback,
@@ -84,6 +126,7 @@ esp_err_t clock_network_start(clock_network_mode_t boot_mode,
 
 clock_network_mode_t clock_network_get_boot_mode(void);
 clock_network_interface_t clock_network_get_active_interface(void);
+clock_network_status_t clock_network_get_status(void);
 bool clock_network_services_started(void);
 
 #ifdef __cplusplus

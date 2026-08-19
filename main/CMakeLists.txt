@@ -10,6 +10,7 @@ idf_component_register(
     "clock_wifi.cpp"
     "clock_network.cpp"
     "clock_network_core.cpp"
+    "clock_network_indicator.cpp"
     "clock_alarm.cpp" 
     "clock_protocol.cpp" 
     "clock_protocol_stream.cpp"

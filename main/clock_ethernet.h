@@ -4,6 +4,7 @@
 #include <stdint.h>
 
 #include "esp_err.h"
+#include "clock_network_events.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -36,11 +37,18 @@ bool clock_ethernet_route_is_ready(void);
 /* Stop the W5500 driver after a bounded boot attempt. */
 esp_err_t clock_ethernet_stop(void);
 
+void clock_ethernet_set_event_callback(
+    clock_network_interface_event_callback_t callback,
+    void *context);
+
 /*
  * Start the existing interface-independent TCP server.
  * The callback is called once for each complete protocol frame.
  */
 esp_err_t clock_ethernet_start_tcp_server(clock_ethernet_rx_callback_t rx_callback);
+
+/* Invalidates the listener and active client, unblocking accept/recv. */
+esp_err_t clock_ethernet_stop_tcp_server(void);
 
 #ifdef __cplusplus
 }

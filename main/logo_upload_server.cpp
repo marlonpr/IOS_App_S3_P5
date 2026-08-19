@@ -33,20 +33,31 @@ static TaskHandle_t s_server_task_handle = nullptr;
 static bool s_server_starting = false;
 static bool s_server_listening = false;
 static bool s_service_registered = false;
+static bool s_server_desired = false;
+static uint32_t s_server_generation = 0;
+static int s_listen_sock = -1;
+static int s_client_sock = -1;
 
 static StaticSemaphore_t s_task_boot_gate_storage;
 static SemaphoreHandle_t s_task_boot_gate = nullptr;
 static StaticEventGroup_t s_start_event_group_storage;
 static EventGroupHandle_t s_start_event_group = nullptr;
 
-static bool logo_upload_server_mark_starting_if_idle()
+static bool logo_upload_server_mark_starting_if_idle(uint32_t *generation)
 {
     portENTER_CRITICAL(&s_server_state_mux);
     bool idle = s_server_task_handle == nullptr && !s_server_starting;
 
     if (idle) {
+        ++s_server_generation;
+        s_server_desired = true;
         s_server_starting = true;
         s_server_listening = false;
+        s_listen_sock = -1;
+        s_client_sock = -1;
+        if (generation != nullptr) {
+            *generation = s_server_generation;
+        }
     }
 
     portEXIT_CRITICAL(&s_server_state_mux);
@@ -63,20 +74,86 @@ static bool logo_upload_server_is_listening()
     return listening;
 }
 
-static void logo_upload_server_mark_listening()
+static bool logo_upload_server_is_current(uint32_t generation)
 {
     portENTER_CRITICAL(&s_server_state_mux);
-    s_server_listening = true;
+    const bool current = s_server_desired &&
+                         generation == s_server_generation;
     portEXIT_CRITICAL(&s_server_state_mux);
+    return current;
 }
 
-static void logo_upload_server_clear_task_state()
+static bool logo_upload_server_mark_listening(uint32_t generation,
+                                              int listen_sock)
+{
+    portENTER_CRITICAL(&s_server_state_mux);
+    const bool current = s_server_desired &&
+                         generation == s_server_generation;
+    if (current) {
+        s_server_listening = true;
+        s_listen_sock = listen_sock;
+    }
+    portEXIT_CRITICAL(&s_server_state_mux);
+    return current;
+}
+
+static bool logo_upload_server_publish_client(uint32_t generation,
+                                              int client_sock)
+{
+    portENTER_CRITICAL(&s_server_state_mux);
+    const bool current = s_server_desired &&
+                         generation == s_server_generation;
+    if (current) {
+        s_client_sock = client_sock;
+    }
+    portEXIT_CRITICAL(&s_server_state_mux);
+    return current;
+}
+
+static bool logo_upload_server_release_client(uint32_t generation,
+                                              int client_sock)
+{
+    bool owned = false;
+    portENTER_CRITICAL(&s_server_state_mux);
+    if (generation == s_server_generation && s_client_sock == client_sock) {
+        s_client_sock = -1;
+        owned = true;
+    }
+    portEXIT_CRITICAL(&s_server_state_mux);
+    return owned;
+}
+
+static void logo_upload_server_clear_task_state(uint32_t generation)
 {
     portENTER_CRITICAL(&s_server_state_mux);
     s_server_task_handle = nullptr;
     s_server_starting = false;
     s_server_listening = false;
+    if (generation == s_server_generation) {
+        s_server_desired = false;
+        s_listen_sock = -1;
+        s_client_sock = -1;
+    }
     portEXIT_CRITICAL(&s_server_state_mux);
+}
+
+static void configure_tcp_keepalive(int socket_fd)
+{
+    int enable = 1;
+    int idle_seconds = 60;
+    int interval_seconds = 15;
+    int probe_count = 4;
+
+    if (setsockopt(socket_fd, SOL_SOCKET, SO_KEEPALIVE,
+                   &enable, sizeof(enable)) != 0 ||
+        setsockopt(socket_fd, IPPROTO_TCP, TCP_KEEPIDLE,
+                   &idle_seconds, sizeof(idle_seconds)) != 0 ||
+        setsockopt(socket_fd, IPPROTO_TCP, TCP_KEEPINTVL,
+                   &interval_seconds, sizeof(interval_seconds)) != 0 ||
+        setsockopt(socket_fd, IPPROTO_TCP, TCP_KEEPCNT,
+                   &probe_count, sizeof(probe_count)) != 0) {
+        ESP_LOGW(TAG, "TCP keepalive configuration failed: errno=%d", errno);
+    }
 }
 
 static bool send_all(int sock, const char *data)
@@ -357,7 +434,8 @@ static void handle_client(int client_sock)
 
 static void logo_upload_server_task(void *param)
 {
-    (void)param;
+    const uint32_t generation =
+        static_cast<uint32_t>(reinterpret_cast<uintptr_t>(param));
 
     if (s_task_boot_gate != nullptr) {
         xSemaphoreTake(s_task_boot_gate, portMAX_DELAY);
@@ -366,6 +444,7 @@ static void logo_upload_server_task(void *param)
     int listen_sock = -1;
     int client_sock = -1;
     int opt = 1;
+    bool listen_published = false;
 
     struct sockaddr_in server_addr = {};
     server_addr.sin_family = AF_INET;
@@ -390,14 +469,19 @@ static void logo_upload_server_task(void *param)
         goto exit_task;
     }
 
-    logo_upload_server_mark_listening();
+    if (!logo_upload_server_mark_listening(generation, listen_sock)) {
+        close(listen_sock);
+        listen_sock = -1;
+        goto exit_task;
+    }
+    listen_published = true;
     ESP_LOGI(TAG, "Logo upload server listening on port %u", (unsigned)kUploadPort);
 
     if (s_start_event_group != nullptr) {
         xEventGroupSetBits(s_start_event_group, kServerReadyBit);
     }
 
-	while (true) {
+	while (logo_upload_server_is_current(generation)) {
 	    struct sockaddr_in client_addr = {};
 	    socklen_t client_len = sizeof(client_addr);
 
@@ -408,9 +492,21 @@ static void logo_upload_server_task(void *param)
 	    );
 
 	    if (client_sock < 0) {
+	        if (!logo_upload_server_is_current(generation)) {
+	            break;
+	        }
 	        ESP_LOGE(TAG, "accept failed: errno=%d", errno);
 	        continue;
 	    }
+
+	    if (!logo_upload_server_publish_client(generation, client_sock)) {
+	        shutdown(client_sock, SHUT_RDWR);
+	        close(client_sock);
+	        client_sock = -1;
+	        break;
+	    }
+
+	    configure_tcp_keepalive(client_sock);
 
 	    ESP_LOGI(
 	        TAG,
@@ -431,26 +527,36 @@ static void logo_upload_server_task(void *param)
 	        clock_logo_operation_end();
 	    }
 
-	    shutdown(client_sock, 0);
-	    close(client_sock);
+	    if (logo_upload_server_release_client(generation, client_sock)) {
+	        shutdown(client_sock, SHUT_RDWR);
+	        close(client_sock);
+	    }
 	    client_sock = -1;
 	}
 
 exit_task:
-    if (client_sock >= 0) {
-        shutdown(client_sock, 0);
+    if (client_sock >= 0 &&
+        logo_upload_server_release_client(generation, client_sock)) {
+        shutdown(client_sock, SHUT_RDWR);
         close(client_sock);
     }
 
-    if (listen_sock >= 0) {
+    if (listen_sock >= 0 &&
+        (logo_upload_server_is_current(generation) || !listen_published)) {
+        shutdown(listen_sock, SHUT_RDWR);
         close(listen_sock);
     }
-
-    logo_upload_server_clear_task_state();
 
     if (s_start_event_group != nullptr) {
         xEventGroupSetBits(s_start_event_group, kServerFailedBit);
     }
+
+    /*
+     * Publish completion before clearing the task handle.  A new generation
+     * cannot start until the handle is clear, so its event-bit reset cannot
+     * race this old generation's final failure notification.
+     */
+    logo_upload_server_clear_task_state(generation);
 
     vTaskDelete(NULL);
 }
@@ -476,9 +582,18 @@ esp_err_t logo_upload_server_register_mdns_service(uint8_t board_id)
 
 esp_err_t logo_upload_server_start(void)
 {
-    if (!logo_upload_server_mark_starting_if_idle()) {
-        ESP_LOGI(TAG, "Logo upload server already running");
-        return ESP_OK;
+    uint32_t generation = 0;
+    if (!logo_upload_server_mark_starting_if_idle(&generation)) {
+        portENTER_CRITICAL(&s_server_state_mux);
+        const bool current_listener = s_server_desired;
+        portEXIT_CRITICAL(&s_server_state_mux);
+
+        if (current_listener) {
+            ESP_LOGI(TAG, "Logo upload server already running");
+            return ESP_OK;
+        }
+        ESP_LOGW(TAG, "Previous logo server generation is still stopping");
+        return ESP_ERR_INVALID_STATE;
     }
 
     if (s_task_boot_gate == nullptr) {
@@ -491,7 +606,7 @@ esp_err_t logo_upload_server_start(void)
 
     if (s_task_boot_gate == nullptr || s_start_event_group == nullptr) {
         ESP_LOGE(TAG, "Failed to start logo upload server: synchronization init failed");
-        logo_upload_server_clear_task_state();
+        logo_upload_server_clear_task_state(generation);
         return ESP_ERR_NO_MEM;
     }
 
@@ -504,14 +619,14 @@ esp_err_t logo_upload_server_start(void)
         logo_upload_server_task,
         "LogoUploadServer",
         4096,
-        NULL,
+        reinterpret_cast<void *>(static_cast<uintptr_t>(generation)),
         4,
         &task_handle,
         0
     );
 
     if (ret != pdPASS) {
-        logo_upload_server_clear_task_state();
+        logo_upload_server_clear_task_state(generation);
         ESP_LOGE(TAG, "Failed to start logo upload server: task creation failed");
         return ESP_ERR_NO_MEM;
     }
@@ -541,5 +656,53 @@ esp_err_t logo_upload_server_start(void)
     }
 
     ESP_LOGE(TAG, "Failed to start logo upload server: startup timed out");
+    return ESP_ERR_TIMEOUT;
+}
+
+esp_err_t logo_upload_server_stop(void)
+{
+    int listen_sock = -1;
+    int client_sock = -1;
+
+    portENTER_CRITICAL(&s_server_state_mux);
+    if (s_server_task_handle == nullptr && !s_server_starting) {
+        s_server_desired = false;
+        s_server_listening = false;
+        portEXIT_CRITICAL(&s_server_state_mux);
+        return ESP_OK;
+    }
+
+    s_server_desired = false;
+    s_server_listening = false;
+    ++s_server_generation;
+    listen_sock = s_listen_sock;
+    client_sock = s_client_sock;
+    s_listen_sock = -1;
+    s_client_sock = -1;
+    portEXIT_CRITICAL(&s_server_state_mux);
+
+    if (client_sock >= 0) {
+        shutdown(client_sock, SHUT_RDWR);
+        close(client_sock);
+    }
+    if (listen_sock >= 0) {
+        shutdown(listen_sock, SHUT_RDWR);
+        close(listen_sock);
+    }
+
+    for (uint32_t waited_ms = 0; waited_ms < 1000; waited_ms += 10) {
+        portENTER_CRITICAL(&s_server_state_mux);
+        const bool running = s_server_task_handle != nullptr ||
+                             s_server_starting;
+        portEXIT_CRITICAL(&s_server_state_mux);
+
+        if (!running) {
+            ESP_LOGI(TAG, "Logo upload listener and client invalidated");
+            return ESP_OK;
+        }
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+
+    ESP_LOGW(TAG, "Timed out waiting for logo upload server to stop");
     return ESP_ERR_TIMEOUT;
 }

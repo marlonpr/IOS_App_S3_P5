@@ -14,13 +14,59 @@
 namespace {
 
 constexpr EventBits_t kWifiGotIpBit = BIT0;
+constexpr EventBits_t kWifiAttemptFailedBit = BIT1;
+constexpr EventBits_t kWifiStartedBit = BIT2;
 const char *const TAG = "CLOCK_WIFI";
 
 EventGroupHandle_t s_wifi_events = nullptr;
 esp_netif_t *s_wifi_netif = nullptr;
 bool s_initialized = false;
-bool s_allow_reconnect = false;
-uint32_t s_retry_count = 0;
+bool s_power_save_configured = false;
+clock_network_interface_event_callback_t s_event_callback = nullptr;
+void *s_event_context = nullptr;
+
+void notify_network(clock_network_interface_event_t event, uint32_t detail = 0)
+{
+    if (s_event_callback != nullptr) {
+        s_event_callback(event, detail, s_event_context);
+    }
+}
+
+const char *disconnect_reason_description(uint8_t reason)
+{
+    switch (reason) {
+        case WIFI_REASON_AUTH_EXPIRE:
+            return "authentication expired";
+        case WIFI_REASON_AUTH_FAIL:
+            return "authentication failed";
+        case WIFI_REASON_NO_AP_FOUND:
+            return "access point not found";
+        case WIFI_REASON_ASSOC_FAIL:
+            return "association failed";
+        case WIFI_REASON_BEACON_TIMEOUT:
+            return "beacon timeout";
+        case WIFI_REASON_HANDSHAKE_TIMEOUT:
+            return "handshake timeout";
+        default:
+            return "unspecified/other";
+    }
+}
+
+void configure_power_save()
+{
+    if (s_power_save_configured) {
+        return;
+    }
+
+    const esp_err_t result = esp_wifi_set_ps(WIFI_PS_NONE);
+    if (result == ESP_OK) {
+        s_power_save_configured = true;
+        ESP_LOGI(TAG, "Wi-Fi power save disabled for always-on operation");
+    } else {
+        ESP_LOGW(TAG, "esp_wifi_set_ps(WIFI_PS_NONE) failed: %s",
+                 esp_err_to_name(result));
+    }
+}
 
 esp_err_t prepare_network_stack()
 {
@@ -43,6 +89,9 @@ void wifi_event_handler(void *,
                         void *event_data)
 {
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
+        xEventGroupClearBits(s_wifi_events, kWifiAttemptFailedBit);
+        xEventGroupSetBits(s_wifi_events, kWifiStartedBit);
+        notify_network(CLOCK_NETWORK_INTERFACE_EVENT_STARTED);
         ESP_LOGI(TAG, "Wi-Fi station started; connecting");
         const esp_err_t result = esp_wifi_connect();
         if (result != ESP_OK) {
@@ -54,21 +103,29 @@ void wifi_event_handler(void *,
 
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
         const auto *event = static_cast<wifi_event_sta_disconnected_t *>(event_data);
+        const uint8_t reason = event == nullptr ? 0U : event->reason;
         xEventGroupClearBits(s_wifi_events, kWifiGotIpBit);
+        xEventGroupSetBits(s_wifi_events, kWifiAttemptFailedBit);
         ESP_LOGW(TAG,
-                 "Wi-Fi disconnected (reason=%u)",
-                 event == nullptr ? 0U : static_cast<unsigned>(event->reason));
+                 "Wi-Fi disconnected: reason=%u (%s)",
+                 static_cast<unsigned>(reason),
+                 disconnect_reason_description(reason));
+        notify_network(CLOCK_NETWORK_INTERFACE_EVENT_DISCONNECTED, reason);
+        return;
+    }
 
-        if (s_allow_reconnect) {
-            ++s_retry_count;
-            ESP_LOGI(TAG, "Wi-Fi reconnect attempt %u",
-                     static_cast<unsigned>(s_retry_count));
-            const esp_err_t result = esp_wifi_connect();
-            if (result != ESP_OK) {
-                ESP_LOGE(TAG, "Wi-Fi reconnect request failed: %s",
-                         esp_err_to_name(result));
-            }
-        }
+    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_STOP) {
+        xEventGroupClearBits(s_wifi_events,
+                             kWifiStartedBit | kWifiGotIpBit);
+        notify_network(CLOCK_NETWORK_INTERFACE_EVENT_STOPPED);
+        return;
+    }
+
+    if (event_base == IP_EVENT && event_id == IP_EVENT_STA_LOST_IP) {
+        xEventGroupClearBits(s_wifi_events, kWifiGotIpBit);
+        xEventGroupSetBits(s_wifi_events, kWifiAttemptFailedBit);
+        ESP_LOGW(TAG, "Wi-Fi lost its local IP address");
+        notify_network(CLOCK_NETWORK_INTERFACE_EVENT_LOST_IP);
         return;
     }
 
@@ -98,8 +155,10 @@ void wifi_event_handler(void *,
         ESP_LOGW(TAG, "Wi-Fi DNS is not ready");
     }
 
-    s_retry_count = 0;
+    xEventGroupClearBits(s_wifi_events, kWifiAttemptFailedBit);
     xEventGroupSetBits(s_wifi_events, kWifiGotIpBit);
+    notify_network(CLOCK_NETWORK_INTERFACE_EVENT_GOT_IP,
+                   event->ip_info.ip.addr);
 }
 
 }  // namespace
@@ -107,7 +166,20 @@ void wifi_event_handler(void *,
 esp_err_t clock_wifi_init_sta(void)
 {
     if (s_initialized) {
-        return ESP_ERR_INVALID_STATE;
+        xEventGroupClearBits(s_wifi_events,
+                             kWifiGotIpBit | kWifiAttemptFailedBit);
+
+        if ((xEventGroupGetBits(s_wifi_events) & kWifiStartedBit) != 0) {
+            ESP_LOGI(TAG, "Requesting another Wi-Fi connection attempt");
+            return esp_wifi_connect();
+        }
+
+        ESP_LOGI(TAG, "Restarting Wi-Fi STA for another connection attempt");
+        const esp_err_t restart_result = esp_wifi_start();
+        if (restart_result == ESP_OK) {
+            configure_power_save();
+        }
+        return restart_result;
     }
 
     if (CONFIG_ESP_WIFI_SSID[0] == '\0') {
@@ -150,7 +222,7 @@ esp_err_t clock_wifi_init_sta(void)
     }
 
     result = esp_event_handler_register(IP_EVENT,
-                                        IP_EVENT_STA_GOT_IP,
+                                        ESP_EVENT_ANY_ID,
                                         &wifi_event_handler,
                                         nullptr);
     if (result != ESP_OK) {
@@ -178,8 +250,6 @@ esp_err_t clock_wifi_init_sta(void)
         return result;
     }
 
-    s_allow_reconnect = true;
-    s_retry_count = 0;
     s_initialized = true;
 
     ESP_LOGI(TAG, "Starting Wi-Fi STA");
@@ -188,8 +258,9 @@ esp_err_t clock_wifi_init_sta(void)
 
     result = esp_wifi_start();
     if (result != ESP_OK) {
-        s_allow_reconnect = false;
         ESP_LOGE(TAG, "esp_wifi_start failed: %s", esp_err_to_name(result));
+    } else {
+        configure_power_save();
     }
 
     return result;
@@ -203,14 +274,18 @@ bool clock_wifi_wait_for_ip(uint32_t timeout_ms)
 
     const EventBits_t bits = xEventGroupWaitBits(
         s_wifi_events,
-        kWifiGotIpBit,
+        kWifiGotIpBit | kWifiAttemptFailedBit,
         pdFALSE,
         pdFALSE,
         pdMS_TO_TICKS(timeout_ms));
 
     if ((bits & kWifiGotIpBit) == 0) {
-        ESP_LOGW(TAG, "Wi-Fi connection timed out after %u ms",
-                 static_cast<unsigned>(timeout_ms));
+        if ((bits & kWifiAttemptFailedBit) != 0) {
+            ESP_LOGW(TAG, "Wi-Fi connection attempt ended without a local IP");
+        } else {
+            ESP_LOGW(TAG, "Wi-Fi connection timed out after %u ms",
+                     static_cast<unsigned>(timeout_ms));
+        }
         return false;
     }
 
@@ -242,8 +317,8 @@ esp_err_t clock_wifi_stop(void)
         return ESP_OK;
     }
 
-    s_allow_reconnect = false;
-    xEventGroupClearBits(s_wifi_events, kWifiGotIpBit);
+    xEventGroupClearBits(s_wifi_events,
+                         kWifiGotIpBit | kWifiAttemptFailedBit);
 
     const esp_err_t result = esp_wifi_stop();
     if (result == ESP_OK) {
@@ -252,4 +327,12 @@ esp_err_t clock_wifi_stop(void)
         ESP_LOGW(TAG, "Wi-Fi stop failed: %s", esp_err_to_name(result));
     }
     return result;
+}
+
+void clock_wifi_set_event_callback(
+    clock_network_interface_event_callback_t callback,
+    void *context)
+{
+    s_event_callback = callback;
+    s_event_context = context;
 }

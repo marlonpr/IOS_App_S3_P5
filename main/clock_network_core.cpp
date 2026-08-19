@@ -179,6 +179,135 @@ bool clock_network_long_hold_update(clock_network_long_hold_t *state,
     return false;
 }
 
+void clock_network_retry_state_init(clock_network_retry_state_t *state,
+                                    uint64_t now_ms)
+{
+    clock_network_retry_start_burst(state, now_ms);
+}
+
+void clock_network_retry_start_burst(clock_network_retry_state_t *state,
+                                     uint64_t now_ms)
+{
+    if (state == nullptr) {
+        return;
+    }
+
+    state->status = CLOCK_NETWORK_CONNECTING;
+    state->attempt = 0;
+    state->attempt_complete = true;
+    state->burst_started_ms = now_ms;
+    state->next_action_ms = now_ms;
+}
+
+bool clock_network_retry_attempt_is_due(
+    const clock_network_retry_state_t *state,
+    uint64_t now_ms)
+{
+    return state != nullptr &&
+           state->status == CLOCK_NETWORK_CONNECTING &&
+           state->attempt_complete &&
+           state->attempt < CLOCK_NETWORK_ATTEMPTS_PER_BURST &&
+           now_ms >= state->next_action_ms;
+}
+
+uint8_t clock_network_retry_begin_attempt(clock_network_retry_state_t *state)
+{
+    if (state == nullptr ||
+        state->status != CLOCK_NETWORK_CONNECTING ||
+        !state->attempt_complete ||
+        state->attempt >= CLOCK_NETWORK_ATTEMPTS_PER_BURST) {
+        return 0;
+    }
+
+    ++state->attempt;
+    state->attempt_complete = false;
+    if (state->attempt < CLOCK_NETWORK_ATTEMPTS_PER_BURST) {
+        state->next_action_ms =
+            state->burst_started_ms +
+            static_cast<uint64_t>(state->attempt) *
+                CLOCK_NETWORK_RETRY_SLOT_MS;
+    } else {
+        /*
+         * The final attempt starts at the last retry boundary.  Keep that
+         * boundary here so its actual completion, rather than a synthetic
+         * fourth slot ending at 80 seconds, controls burst exhaustion.
+         */
+        state->next_action_ms =
+            state->burst_started_ms +
+            CLOCK_NETWORK_FINAL_ATTEMPT_START_MS;
+    }
+    return state->attempt;
+}
+
+void clock_network_retry_attempt_failed(clock_network_retry_state_t *state)
+{
+    if (state == nullptr ||
+        state->status != CLOCK_NETWORK_CONNECTING ||
+        state->attempt == 0 ||
+        state->attempt_complete) {
+        return;
+    }
+
+    state->attempt_complete = true;
+}
+
+bool clock_network_retry_burst_is_exhausted(
+    const clock_network_retry_state_t *state,
+    uint64_t now_ms)
+{
+    return state != nullptr &&
+           state->status == CLOCK_NETWORK_CONNECTING &&
+           state->attempt_complete &&
+           state->attempt == CLOCK_NETWORK_ATTEMPTS_PER_BURST &&
+           now_ms >= state->next_action_ms;
+}
+
+void clock_network_retry_enter_cooldown(clock_network_retry_state_t *state,
+                                        uint64_t now_ms)
+{
+    if (state == nullptr) {
+        return;
+    }
+
+    state->status = CLOCK_NETWORK_OFFLINE;
+    state->attempt = 0;
+    state->attempt_complete = true;
+    state->burst_started_ms = 0;
+    state->next_action_ms = now_ms + CLOCK_NETWORK_COOLDOWN_MS;
+}
+
+bool clock_network_retry_cooldown_is_expired(
+    const clock_network_retry_state_t *state,
+    uint64_t now_ms)
+{
+    return state != nullptr &&
+           state->status == CLOCK_NETWORK_OFFLINE &&
+           now_ms >= state->next_action_ms;
+}
+
+void clock_network_retry_connected(clock_network_retry_state_t *state)
+{
+    if (state == nullptr) {
+        return;
+    }
+
+    state->status = CLOCK_NETWORK_ONLINE;
+    state->attempt = 0;
+    state->attempt_complete = true;
+    state->burst_started_ms = 0;
+    state->next_action_ms = 0;
+}
+
+void clock_network_retry_disconnected(clock_network_retry_state_t *state,
+                                      uint64_t now_ms)
+{
+    if (state == nullptr) {
+        return;
+    }
+
+    clock_network_retry_start_burst(state, now_ms);
+}
+
 esp_err_t clock_network_cycle_saved_mode(
     clock_network_mode_t current_mode,
     clock_network_save_mode_callback_t save_callback,

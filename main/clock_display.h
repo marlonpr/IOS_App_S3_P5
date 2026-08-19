@@ -35,6 +35,9 @@ void clock_display_draw_mode_3(Hub75Driver *driver,
 
 void clock_display_draw_logo(Hub75Driver *driver);
 
+/* Draws the network overlay into the current back buffer without flipping it. */
+void clock_display_draw_network_status_overlay(Hub75Driver *driver);
+
 void clock_display_draw_startup(Hub75Driver *driver,
                                 int display_mode,
                                 int brightness_level,

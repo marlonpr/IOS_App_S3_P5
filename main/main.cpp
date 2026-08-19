@@ -104,6 +104,12 @@ static uint8_t brightness_level_to_hub75(int level)
     return (uint8_t)((level * 255) / 10);
 }
 
+static void present_display_frame(Hub75Driver *display_driver)
+{
+    clock_display_draw_network_status_overlay(display_driver);
+    display_driver->flip_buffer();
+}
+
 
 
 // =============================== DEFAULT RTC TIME ===============================
@@ -513,7 +519,7 @@ void display_update_task(void* pvParameters)
 		                    0);
 		    }
 
-		    driver->flip_buffer();
+		    present_display_frame(driver);
 
 		    vTaskDelayUntil(&xLastWakeTime, xFrequency);
 		    continue;
@@ -522,7 +528,7 @@ void display_update_task(void* pvParameters)
 		if (message_active_copy) {
 		    scroll_stop();
 		    draw_temp_message(driver, message_copy);
-		    driver->flip_buffer();
+		    present_display_frame(driver);
 
 		    vTaskDelayUntil(&xLastWakeTime, xFrequency);
 		    continue;
@@ -533,7 +539,7 @@ void display_update_task(void* pvParameters)
 
 		    clock_display_draw_logo(driver);
 
-		    driver->flip_buffer();
+		    present_display_frame(driver);
 
 		    vTaskDelayUntil(&xLastWakeTime, xFrequency);
 		    continue;
@@ -549,7 +555,7 @@ void display_update_task(void* pvParameters)
 			                           clock_network_mode_panel_label(
 			                               saved_network_mode_copy));
 
-		    driver->flip_buffer();
+		    present_display_frame(driver);
 
 		    vTaskDelayUntil(&xLastWakeTime, xFrequency);
 		    continue;
@@ -558,7 +564,7 @@ void display_update_task(void* pvParameters)
 		if (menu_active_copy) {
 		    scroll_stop();
 		    clock_menu_draw(driver);
-		    driver->flip_buffer();
+		    present_display_frame(driver);
 
 		    vTaskDelayUntil(&xLastWakeTime, xFrequency);
 		    continue;
@@ -677,7 +683,7 @@ void display_update_task(void* pvParameters)
 		    draw_string(*driver, 2, 2, "NO RTC", 255, 0, 0);
 		}
 
-		driver->flip_buffer();
+		present_display_frame(driver);
 
 		vTaskDelayUntil(&xLastWakeTime, xFrequency);
     }
