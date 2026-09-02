@@ -5,19 +5,18 @@
 
 bool clock_network_mode_is_valid(uint8_t mode)
 {
-    return mode <= CLOCK_NETWORK_MODE_WIFI;
+    return mode == CLOCK_NETWORK_MODE_ETHERNET ||
+           mode == CLOCK_NETWORK_MODE_WIFI;
 }
 
 clock_network_mode_t clock_network_next_mode(clock_network_mode_t mode)
 {
     switch (mode) {
-        case CLOCK_NETWORK_MODE_AUTO:
-            return CLOCK_NETWORK_MODE_ETHERNET;
         case CLOCK_NETWORK_MODE_ETHERNET:
             return CLOCK_NETWORK_MODE_WIFI;
         case CLOCK_NETWORK_MODE_WIFI:
         default:
-            return CLOCK_NETWORK_MODE_AUTO;
+            return CLOCK_NETWORK_MODE_ETHERNET;
     }
 }
 
@@ -28,9 +27,8 @@ const char *clock_network_mode_label(clock_network_mode_t mode)
             return "Ethernet";
         case CLOCK_NETWORK_MODE_WIFI:
             return "Wi-Fi";
-        case CLOCK_NETWORK_MODE_AUTO:
         default:
-            return "Auto";
+            return "Unknown";
     }
 }
 
@@ -41,9 +39,8 @@ const char *clock_network_mode_panel_label(clock_network_mode_t mode)
             return "NET: ETH";
         case CLOCK_NETWORK_MODE_WIFI:
             return "NET: WIFI";
-        case CLOCK_NETWORK_MODE_AUTO:
         default:
-            return "NET: AUTO";
+            return "NET: UNKNOWN";
     }
 }
 
@@ -127,25 +124,14 @@ bool clock_network_result_gate_finish_startup(
     return true;
 }
 
-clock_network_interface_t clock_network_first_interface(clock_network_mode_t mode)
+clock_network_interface_t clock_network_selected_interface(
+    clock_network_mode_t mode)
 {
     if (mode == CLOCK_NETWORK_MODE_WIFI) {
         return CLOCK_NETWORK_INTERFACE_WIFI;
     }
 
     return CLOCK_NETWORK_INTERFACE_ETHERNET;
-}
-
-clock_network_interface_t clock_network_fallback_interface(
-    clock_network_mode_t mode,
-    clock_network_interface_t failed_interface)
-{
-    if (mode == CLOCK_NETWORK_MODE_AUTO &&
-        failed_interface == CLOCK_NETWORK_INTERFACE_ETHERNET) {
-        return CLOCK_NETWORK_INTERFACE_WIFI;
-    }
-
-    return CLOCK_NETWORK_INTERFACE_NONE;
 }
 
 bool clock_network_service_guard_try_start(clock_network_service_guard_t *guard)
@@ -221,21 +207,10 @@ uint8_t clock_network_retry_begin_attempt(clock_network_retry_state_t *state)
 
     ++state->attempt;
     state->attempt_complete = false;
-    if (state->attempt < CLOCK_NETWORK_ATTEMPTS_PER_BURST) {
-        state->next_action_ms =
-            state->burst_started_ms +
-            static_cast<uint64_t>(state->attempt) *
-                CLOCK_NETWORK_RETRY_SLOT_MS;
-    } else {
-        /*
-         * The final attempt starts at the last retry boundary.  Keep that
-         * boundary here so its actual completion, rather than a synthetic
-         * fourth slot ending at 80 seconds, controls burst exhaustion.
-         */
-        state->next_action_ms =
-            state->burst_started_ms +
-            CLOCK_NETWORK_FINAL_ATTEMPT_START_MS;
-    }
+    state->next_action_ms =
+        state->burst_started_ms +
+        static_cast<uint64_t>(state->attempt) *
+            CLOCK_NETWORK_RETRY_SLOT_MS;
     return state->attempt;
 }
 

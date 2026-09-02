@@ -7,6 +7,8 @@
 
 void network_settings_test_reset(void);
 void network_settings_test_store_raw(unsigned char value);
+unsigned char network_settings_test_read_raw(void);
+int network_settings_test_network_mode_write_count(void);
 
 static void fail_at(int line, const char *expression)
 {
@@ -22,12 +24,12 @@ static void fail_at(int line, const char *expression)
     } while (0)
 
 #define REQUIRE_EQ(actual, expected) REQUIRE((actual) == (expected))
-#define REQUIRE_TEXT(actual, expected) REQUIRE(std::strcmp((actual), (expected)) == 0)
+#define REQUIRE_TEXT(actual, expected) \
+    REQUIRE(std::strcmp((actual), (expected)) == 0)
 
 namespace {
 
 int s_save_count = 0;
-int s_interface_start_count = 0;
 uint8_t s_last_saved_mode = 0xff;
 
 esp_err_t fake_save(uint8_t mode, void *)
@@ -37,34 +39,63 @@ esp_err_t fake_save(uint8_t mode, void *)
     return ESP_OK;
 }
 
-void reset_cycle_spies()
+void test_only_ethernet_and_wifi_are_selectable()
 {
-    s_save_count = 0;
-    s_interface_start_count = 0;
-    s_last_saved_mode = 0xff;
+    REQUIRE_EQ(static_cast<uint8_t>(CLOCK_NETWORK_MODE_ETHERNET), 1U);
+    REQUIRE_EQ(static_cast<uint8_t>(CLOCK_NETWORK_MODE_WIFI), 2U);
+    REQUIRE(!clock_network_mode_is_valid(
+        CLOCK_NETWORK_MODE_LEGACY_AUTO_VALUE));
+    REQUIRE(clock_network_mode_is_valid(CLOCK_NETWORK_MODE_ETHERNET));
+    REQUIRE(clock_network_mode_is_valid(CLOCK_NETWORK_MODE_WIFI));
+    REQUIRE(!clock_network_mode_is_valid(3));
 }
 
-void test_nvs_defaults_and_values()
+void test_nvs_defaults_and_supported_values()
 {
     network_settings_test_reset();
-    REQUIRE_EQ(clock_settings_load_network_mode(), CLOCK_NETWORK_MODE_AUTO);
-
-    network_settings_test_store_raw(99);
-    REQUIRE_EQ(clock_settings_load_network_mode(), CLOCK_NETWORK_MODE_AUTO);
-
-    REQUIRE_EQ(clock_settings_save_network_mode(CLOCK_NETWORK_MODE_AUTO), ESP_OK);
-    REQUIRE_EQ(clock_settings_load_network_mode(), CLOCK_NETWORK_MODE_AUTO);
-    REQUIRE_EQ(clock_settings_save_network_mode(CLOCK_NETWORK_MODE_ETHERNET), ESP_OK);
-    REQUIRE_EQ(clock_settings_load_network_mode(), CLOCK_NETWORK_MODE_ETHERNET);
-    REQUIRE_EQ(clock_settings_save_network_mode(CLOCK_NETWORK_MODE_WIFI), ESP_OK);
     REQUIRE_EQ(clock_settings_load_network_mode(), CLOCK_NETWORK_MODE_WIFI);
+    REQUIRE_EQ(network_settings_test_network_mode_write_count(), 0);
+
+    REQUIRE_EQ(clock_settings_save_network_mode(CLOCK_NETWORK_MODE_ETHERNET),
+               ESP_OK);
+    REQUIRE_EQ(clock_settings_load_network_mode(), CLOCK_NETWORK_MODE_ETHERNET);
+    REQUIRE_EQ(clock_settings_save_network_mode(CLOCK_NETWORK_MODE_WIFI),
+               ESP_OK);
+    REQUIRE_EQ(clock_settings_load_network_mode(), CLOCK_NETWORK_MODE_WIFI);
+    REQUIRE_EQ(clock_settings_save_network_mode(
+                   CLOCK_NETWORK_MODE_LEGACY_AUTO_VALUE),
+               ESP_ERR_INVALID_ARG);
     REQUIRE_EQ(clock_settings_save_network_mode(3), ESP_ERR_INVALID_ARG);
+}
+
+void test_legacy_auto_migrates_to_wifi_once()
+{
+    network_settings_test_reset();
+    network_settings_test_store_raw(CLOCK_NETWORK_MODE_LEGACY_AUTO_VALUE);
+
+    REQUIRE_EQ(clock_settings_load_network_mode(), CLOCK_NETWORK_MODE_WIFI);
+    REQUIRE_EQ(network_settings_test_read_raw(), CLOCK_NETWORK_MODE_WIFI);
+    REQUIRE_EQ(network_settings_test_network_mode_write_count(), 1);
+
+    REQUIRE_EQ(clock_settings_load_network_mode(), CLOCK_NETWORK_MODE_WIFI);
+    REQUIRE_EQ(network_settings_test_network_mode_write_count(), 1);
+}
+
+void test_unknown_mode_falls_back_and_is_repaired()
+{
+    network_settings_test_reset();
+    network_settings_test_store_raw(99);
+
+    REQUIRE_EQ(clock_settings_load_network_mode(), CLOCK_NETWORK_MODE_WIFI);
+    REQUIRE_EQ(network_settings_test_read_raw(), CLOCK_NETWORK_MODE_WIFI);
+    REQUIRE_EQ(network_settings_test_network_mode_write_count(), 1);
 }
 
 void require_cycle(clock_network_mode_t current,
                    clock_network_mode_t expected)
 {
-    reset_cycle_spies();
+    s_save_count = 0;
+    s_last_saved_mode = 0xff;
     clock_network_mode_t next = current;
     REQUIRE_EQ(clock_network_cycle_saved_mode(current,
                                               fake_save,
@@ -74,24 +105,23 @@ void require_cycle(clock_network_mode_t current,
     REQUIRE_EQ(next, expected);
     REQUIRE_EQ(s_save_count, 1);
     REQUIRE_EQ(s_last_saved_mode, static_cast<uint8_t>(expected));
-    REQUIRE_EQ(s_interface_start_count, 0);
 }
 
 void test_saved_mode_cycle_has_no_live_interface_side_effect()
 {
-    require_cycle(CLOCK_NETWORK_MODE_AUTO, CLOCK_NETWORK_MODE_ETHERNET);
     require_cycle(CLOCK_NETWORK_MODE_ETHERNET, CLOCK_NETWORK_MODE_WIFI);
-    require_cycle(CLOCK_NETWORK_MODE_WIFI, CLOCK_NETWORK_MODE_AUTO);
+    require_cycle(CLOCK_NETWORK_MODE_WIFI, CLOCK_NETWORK_MODE_ETHERNET);
 }
 
 void test_labels()
 {
-    REQUIRE_TEXT(clock_network_mode_label(CLOCK_NETWORK_MODE_AUTO), "Auto");
-    REQUIRE_TEXT(clock_network_mode_label(CLOCK_NETWORK_MODE_ETHERNET), "Ethernet");
+    REQUIRE_TEXT(clock_network_mode_label(CLOCK_NETWORK_MODE_ETHERNET),
+                 "Ethernet");
     REQUIRE_TEXT(clock_network_mode_label(CLOCK_NETWORK_MODE_WIFI), "Wi-Fi");
-    REQUIRE_TEXT(clock_network_mode_panel_label(CLOCK_NETWORK_MODE_AUTO), "NET: AUTO");
-    REQUIRE_TEXT(clock_network_mode_panel_label(CLOCK_NETWORK_MODE_ETHERNET), "NET: ETH");
-    REQUIRE_TEXT(clock_network_mode_panel_label(CLOCK_NETWORK_MODE_WIFI), "NET: WIFI");
+    REQUIRE_TEXT(clock_network_mode_panel_label(CLOCK_NETWORK_MODE_ETHERNET),
+                 "NET: ETH");
+    REQUIRE_TEXT(clock_network_mode_panel_label(CLOCK_NETWORK_MODE_WIFI),
+                 "NET: WIFI");
     REQUIRE_TEXT(clock_network_result_message(CLOCK_NETWORK_INTERFACE_ETHERNET),
                  "ETH CONNECTED");
     REQUIRE_TEXT(clock_network_result_message(CLOCK_NETWORK_INTERFACE_WIFI),
@@ -101,7 +131,6 @@ void test_labels()
     REQUIRE(clock_network_is_result_message("ETH CONNECTED"));
     REQUIRE(clock_network_is_result_message("WIFI CONNECTED"));
     REQUIRE(clock_network_is_result_message("NET NOT CONNECTED"));
-    REQUIRE(!clock_network_is_result_message("TRY WIFI"));
     REQUIRE(!clock_network_is_result_message("REBOOT TO APPLY"));
 }
 
@@ -149,30 +178,15 @@ void test_non_result_messages_are_never_delayed()
     clock_network_result_gate_t gate = {};
     clock_network_result_gate_init(&gate);
 
-    REQUIRE(clock_network_result_gate_submit(&gate, "TRY WIFI", 1500));
     REQUIRE(clock_network_result_gate_submit(&gate, "REBOOT TO APPLY", 2500));
 }
 
-void test_boot_order()
+void test_each_mode_selects_only_its_interface()
 {
-    REQUIRE_EQ(clock_network_first_interface(CLOCK_NETWORK_MODE_AUTO),
+    REQUIRE_EQ(clock_network_selected_interface(CLOCK_NETWORK_MODE_ETHERNET),
                CLOCK_NETWORK_INTERFACE_ETHERNET);
-    REQUIRE_EQ(clock_network_fallback_interface(
-                   CLOCK_NETWORK_MODE_AUTO,
-                   CLOCK_NETWORK_INTERFACE_ETHERNET),
+    REQUIRE_EQ(clock_network_selected_interface(CLOCK_NETWORK_MODE_WIFI),
                CLOCK_NETWORK_INTERFACE_WIFI);
-    REQUIRE_EQ(clock_network_first_interface(CLOCK_NETWORK_MODE_ETHERNET),
-               CLOCK_NETWORK_INTERFACE_ETHERNET);
-    REQUIRE_EQ(clock_network_fallback_interface(
-                   CLOCK_NETWORK_MODE_ETHERNET,
-                   CLOCK_NETWORK_INTERFACE_ETHERNET),
-               CLOCK_NETWORK_INTERFACE_NONE);
-    REQUIRE_EQ(clock_network_first_interface(CLOCK_NETWORK_MODE_WIFI),
-               CLOCK_NETWORK_INTERFACE_WIFI);
-    REQUIRE_EQ(clock_network_fallback_interface(
-                   CLOCK_NETWORK_MODE_WIFI,
-                   CLOCK_NETWORK_INTERFACE_WIFI),
-               CLOCK_NETWORK_INTERFACE_NONE);
 }
 
 void test_long_hold_fires_once_per_hold()
@@ -218,13 +232,16 @@ void test_services_and_ota_start_once_after_ip()
 
 int main()
 {
-    test_nvs_defaults_and_values();
+    test_only_ethernet_and_wifi_are_selectable();
+    test_nvs_defaults_and_supported_values();
+    test_legacy_auto_migrates_to_wifi_once();
+    test_unknown_mode_falls_back_and_is_repaired();
     test_saved_mode_cycle_has_no_live_interface_side_effect();
     test_labels();
     test_network_results_wait_for_startup();
     test_result_is_immediate_after_startup();
     test_non_result_messages_are_never_delayed();
-    test_boot_order();
+    test_each_mode_selects_only_its_interface();
     test_long_hold_fires_once_per_hold();
     test_services_and_ota_start_once_after_ip();
     std::puts("network mode tests passed");

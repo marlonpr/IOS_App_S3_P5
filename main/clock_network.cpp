@@ -35,7 +35,7 @@ struct pending_network_events_t {
 
 portMUX_TYPE s_state_lock = portMUX_INITIALIZER_UNLOCKED;
 
-int s_boot_mode = CLOCK_NETWORK_MODE_AUTO;
+int s_boot_mode = CLOCK_NETWORK_MODE_WIFI;
 int s_active_interface = CLOCK_NETWORK_INTERFACE_NONE;
 int s_network_status = CLOCK_NETWORK_CONNECTING;
 uint8_t s_retry_attempt = 0;
@@ -332,22 +332,16 @@ void start_network_services(clock_network_interface_t interface,
     }
 }
 
-uint32_t connection_timeout_ms(clock_network_mode_t mode,
-                               clock_network_interface_t interface)
+uint32_t connection_timeout_ms(clock_network_interface_t interface)
 {
     if (interface == CLOCK_NETWORK_INTERFACE_ETHERNET) {
-        return mode == CLOCK_NETWORK_MODE_AUTO
-                   ? CONFIG_CLOCK_NETWORK_AUTO_ETH_TIMEOUT_MS
-                   : CONFIG_CLOCK_NETWORK_ETH_TIMEOUT_MS;
+        return CONFIG_CLOCK_NETWORK_ETH_TIMEOUT_MS;
     }
 
-    return mode == CLOCK_NETWORK_MODE_AUTO
-               ? CONFIG_CLOCK_NETWORK_AUTO_WIFI_TIMEOUT_MS
-               : CONFIG_CLOCK_NETWORK_WIFI_TIMEOUT_MS;
+    return CONFIG_CLOCK_NETWORK_WIFI_TIMEOUT_MS;
 }
 
 uint32_t connection_timeout_within_slot(
-    clock_network_mode_t mode,
     clock_network_interface_t interface,
     uint64_t slot_deadline_ms)
 {
@@ -357,15 +351,14 @@ uint32_t connection_timeout_within_slot(
     }
 
     const uint64_t remaining_ms = slot_deadline_ms - current_ms;
-    const uint32_t configured_ms = connection_timeout_ms(mode, interface);
+    const uint32_t configured_ms = connection_timeout_ms(interface);
     return remaining_ms < configured_ms
                ? static_cast<uint32_t>(remaining_ms)
                : configured_ms;
 }
 
 bool attempt_interface(clock_network_interface_t interface,
-                       uint32_t timeout_ms,
-                       bool stop_on_failure)
+                       uint32_t timeout_ms)
 {
     if (timeout_ms == 0) {
         return false;
@@ -403,7 +396,7 @@ bool attempt_interface(clock_network_interface_t interface,
         return true;
     }
 
-    if (result != ESP_OK || stop_on_failure) {
+    if (result != ESP_OK) {
         if (interface == CLOCK_NETWORK_INTERFACE_ETHERNET) {
             (void)clock_ethernet_stop();
         } else {
@@ -414,58 +407,18 @@ bool attempt_interface(clock_network_interface_t interface,
 }
 
 bool perform_connection_attempt(clock_network_mode_t mode,
-                                uint64_t slot_deadline_ms)
+                                 uint64_t slot_deadline_ms)
 {
-    const clock_network_interface_t active = get_active_interface_locked();
-    if (active != CLOCK_NETWORK_INTERFACE_NONE) {
-        return attempt_interface(
-            active,
-            connection_timeout_within_slot(mode, active, slot_deadline_ms),
-            false);
-    }
-
-    const clock_network_interface_t first = clock_network_first_interface(mode);
-    const clock_network_interface_t fallback =
-        clock_network_fallback_interface(mode, first);
-    if (attempt_interface(
-            first,
-            connection_timeout_within_slot(mode, first, slot_deadline_ms),
-            fallback != CLOCK_NETWORK_INTERFACE_NONE)) {
-        return true;
-    }
-
-    if (fallback == CLOCK_NETWORK_INTERFACE_NONE) {
-        set_active_interface(first);
-        return false;
-    }
-
-    ESP_LOGW(TAG, "Ethernet failed in Auto mode; trying Wi-Fi");
-    if (s_show_message != nullptr) {
-        s_show_message("TRY WIFI", 1500);
-    }
-
-    if (attempt_interface(
-            fallback,
-            connection_timeout_within_slot(mode, fallback, slot_deadline_ms),
-            true)) {
-        return true;
-    }
-
-    set_active_interface(CLOCK_NETWORK_INTERFACE_NONE);
-    return false;
+    const clock_network_interface_t selected =
+        clock_network_selected_interface(mode);
+    return attempt_interface(
+        selected,
+        connection_timeout_within_slot(selected, slot_deadline_ms));
 }
 
 const char *reconnect_target_label(clock_network_mode_t mode)
 {
-    switch (get_active_interface_locked()) {
-        case CLOCK_NETWORK_INTERFACE_ETHERNET:
-            return "Ethernet";
-        case CLOCK_NETWORK_INTERFACE_WIFI:
-            return "Wi-Fi";
-        case CLOCK_NETWORK_INTERFACE_NONE:
-        default:
-            return clock_network_mode_label(mode);
-    }
+    return clock_network_mode_label(mode);
 }
 
 void stop_selected_interface()
@@ -585,19 +538,7 @@ void network_supervisor_task(void *)
                      static_cast<unsigned>(attempt),
                      static_cast<unsigned>(CLOCK_NETWORK_ATTEMPTS_PER_BURST));
 
-            uint64_t attempt_deadline_ms = retry.next_action_ms;
-            if (attempt == CLOCK_NETWORK_ATTEMPTS_PER_BURST) {
-                /*
-                 * Attempt 4 starts at the 60-second boundary and gets one
-                 * normal bounded connection window.  Its failure transitions
-                 * directly to cooldown; this deadline is not another retry
-                 * boundary.
-                 */
-                attempt_deadline_ms =
-                    now_ms() + CLOCK_NETWORK_RETRY_SLOT_MS;
-            }
-
-            if (perform_connection_attempt(mode, attempt_deadline_ms) ||
+            if (perform_connection_attempt(mode, retry.next_action_ms) ||
                 clock_network_get_status() == CLOCK_NETWORK_ONLINE) {
                 clock_network_retry_connected(&retry);
                 set_retry_attempt(0);

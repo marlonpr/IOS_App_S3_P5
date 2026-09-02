@@ -149,7 +149,7 @@ static hour_format_t clock_format = FORMAT_12H;
 // =============================== DISPLAY MODES ===============================
 
 static display_mode_t display_mode = MODE_1;
-static clock_network_mode_t g_saved_network_mode = CLOCK_NETWORK_MODE_AUTO;
+static clock_network_mode_t g_saved_network_mode = CLOCK_NETWORK_MODE_WIFI;
 
 
 static void set_temp_message_locked(const char *msg, uint32_t duration_ms)

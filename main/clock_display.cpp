@@ -786,7 +786,7 @@ void clock_display_draw_startup(Hub75Driver *driver,
     snprintf(line3, sizeof(line3), "%s",
              format == FORMAT_24H ? "24HRS:ON" : "24HRS:OFF");
     snprintf(line4, sizeof(line4), "%s",
-             network_mode_label != nullptr ? network_mode_label : "NET: AUTO");
+             network_mode_label != nullptr ? network_mode_label : "NET: WIFI");
 
     draw_string_5x7(*driver, clock_display_center_x_5x7(line1), 0,  line1, 255, 0, 0);
     draw_string_5x7(*driver, clock_display_center_x_5x7(line2), 8,  line2, 0, 255, 0);

@@ -29,31 +29,9 @@ Hub75Config make_config()
 	config.layout_cols  = 1;
 
 	config.layout = Hub75PanelLayout::HORIZONTAL;	
-/*
-	//============================ HUB75 DevKitC-1 ================================
-	// Upper RGB
-	config.pins.r1 = 4;
-	config.pins.g1 = 5;
-	config.pins.b1 = 6;
 	
-	// Lower RGB
-	config.pins.r2 = 7;
-	config.pins.g2 = 15;
-	config.pins.b2 = 16;
-	
-	// Address
-	config.pins.a = 11;
-	config.pins.b = 12;
-	config.pins.c = 13;
-	config.pins.d = -1;
-	config.pins.e = -1;
-	
-	// Control
-	config.pins.lat = 9;
-	config.pins.oe  = 10;
-	config.pins.clk = 8;
-*/
-	//============================ HUB75 ETH Development Board ================================
+	config.min_refresh_rate = 200;
+
 
 	// Upper RGB
 	config.pins.r1 = 33;
@@ -76,6 +54,32 @@ Hub75Config make_config()
 	config.pins.lat = 16;
 	config.pins.oe  = 21;
 	config.pins.clk = 47;
+	
+	/*
+		//============================ HUB75 DevKitC-1 ================================
+		// Upper RGB
+		config.pins.r1 = 4;
+		config.pins.g1 = 5;
+		config.pins.b1 = 6;
+		
+		// Lower RGB
+		config.pins.r2 = 7;
+		config.pins.g2 = 15;
+		config.pins.b2 = 16;
+		
+		// Address
+		config.pins.a = 11;
+		config.pins.b = 12;
+		config.pins.c = 13;
+		config.pins.d = -1;
+		config.pins.e = -1;
+		
+		// Control
+		config.pins.lat = 9;
+		config.pins.oe  = 10;
+		config.pins.clk = 8;
+	*/
+		//============================ HUB75 ETH Development Board ================================
 
     return config;
 }

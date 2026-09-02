@@ -43,11 +43,15 @@ void begin_and_fail_attempt(clock_network_retry_state_t *state,
     REQUIRE_EQ(state->attempt, expected_attempt);
 }
 
-void test_reconnect_burst_and_cooldown_timeline()
+void require_reconnect_burst_and_cooldown_timeline(
+    clock_network_mode_t mode,
+    clock_network_interface_t expected_interface)
 {
+    REQUIRE_EQ(clock_network_selected_interface(mode), expected_interface);
     REQUIRE_EQ(CLOCK_NETWORK_RETRY_SLOT_MS, 20000UL);
-    REQUIRE_EQ(CLOCK_NETWORK_ATTEMPTS_PER_BURST, 4U);
-    REQUIRE_EQ(CLOCK_NETWORK_FINAL_ATTEMPT_START_MS, 60000UL);
+    REQUIRE_EQ(CLOCK_NETWORK_ATTEMPTS_PER_BURST, 3U);
+    REQUIRE_EQ(CLOCK_NETWORK_FINAL_ATTEMPT_START_MS, 40000UL);
+    REQUIRE_EQ(CLOCK_NETWORK_BURST_DURATION_MS, 60000UL);
     REQUIRE_EQ(CLOCK_NETWORK_COOLDOWN_MS, 300000UL);
 
     constexpr uint64_t kBurstStartMs = 1000;
@@ -88,18 +92,18 @@ void test_reconnect_burst_and_cooldown_timeline()
         &state,
         kBurstStartMs + 2ULL * CLOCK_NETWORK_RETRY_SLOT_MS,
         3);
-    const uint64_t final_attempt_start_ms =
-        kBurstStartMs + CLOCK_NETWORK_FINAL_ATTEMPT_START_MS;
-    REQUIRE_EQ(state.next_action_ms, final_attempt_start_ms);
+    const uint64_t burst_end_ms =
+        kBurstStartMs + CLOCK_NETWORK_BURST_DURATION_MS;
+    REQUIRE_EQ(state.next_action_ms, burst_end_ms);
     REQUIRE_EQ(state.status, CLOCK_NETWORK_CONNECTING);
     require_color(state.status, 0, 255, 255, 255, 3);
 
-    const uint64_t before_final_attempt_ms[] = {
+    const uint64_t before_burst_end_ms[] = {
         kBurstStartMs + 41000,
         kBurstStartMs + 50000,
-        final_attempt_start_ms - 1,
+        burst_end_ms - 1,
     };
-    for (uint64_t timestamp_ms : before_final_attempt_ms) {
+    for (uint64_t timestamp_ms : before_burst_end_ms) {
         REQUIRE_EQ(state.status, CLOCK_NETWORK_CONNECTING);
         REQUIRE_EQ(state.attempt, 3);
         REQUIRE(!clock_network_retry_attempt_is_due(&state, timestamp_ms));
@@ -108,50 +112,27 @@ void test_reconnect_burst_and_cooldown_timeline()
         require_color(state.status, 0, 255, 255, 255, 3);
     }
 
-    REQUIRE(clock_network_retry_attempt_is_due(&state,
-                                                final_attempt_start_ms));
-    REQUIRE_EQ(clock_network_retry_begin_attempt(&state), 4);
-    REQUIRE_EQ(state.status, CLOCK_NETWORK_CONNECTING);
-    REQUIRE_EQ(state.attempt, 4);
-    REQUIRE(!state.attempt_complete);
-    REQUIRE_EQ(state.next_action_ms, final_attempt_start_ms);
-    REQUIRE(!clock_network_retry_burst_is_exhausted(
-        &state, final_attempt_start_ms));
-    require_color(state.status, 0, 255, 255, 255, 3);
-
-    const uint64_t final_attempt_failure_ms =
-        final_attempt_start_ms + 2000;
-    REQUIRE(!clock_network_retry_burst_is_exhausted(
-        &state, final_attempt_failure_ms));
-    REQUIRE(!clock_network_retry_burst_is_exhausted(
-        &state, kBurstStartMs + 80000));
-    REQUIRE_EQ(state.status, CLOCK_NETWORK_CONNECTING);
-    require_color(state.status, 0, 255, 255, 255, 3);
-
-    clock_network_retry_attempt_failed(&state);
-    REQUIRE_EQ(state.status, CLOCK_NETWORK_CONNECTING);
-    REQUIRE(clock_network_retry_burst_is_exhausted(
-        &state, final_attempt_failure_ms));
-    REQUIRE(final_attempt_failure_ms < kBurstStartMs + 80000);
+    REQUIRE(!clock_network_retry_attempt_is_due(&state, burst_end_ms));
+    REQUIRE(clock_network_retry_burst_is_exhausted(&state, burst_end_ms));
 
     clock_network_retry_enter_cooldown(&state,
-                                       final_attempt_failure_ms);
+                                       burst_end_ms);
     REQUIRE_EQ(state.status, CLOCK_NETWORK_OFFLINE);
     REQUIRE_EQ(state.attempt, 0);
     REQUIRE_EQ(state.next_action_ms,
-               final_attempt_failure_ms + CLOCK_NETWORK_COOLDOWN_MS);
+               burst_end_ms + CLOCK_NETWORK_COOLDOWN_MS);
     require_color(state.status, 0, 255, 0, 0, 3);
 
     const uint64_t cooldown_checks_ms[] = {1000, 60000, 299000};
     for (uint64_t offset_ms : cooldown_checks_ms) {
         REQUIRE(!clock_network_retry_cooldown_is_expired(
-            &state, final_attempt_failure_ms + offset_ms));
+            &state, burst_end_ms + offset_ms));
         REQUIRE_EQ(state.status, CLOCK_NETWORK_OFFLINE);
         require_color(state.status, 0, 255, 0, 0, 3);
     }
 
     const uint64_t cooldown_end_ms =
-        final_attempt_failure_ms + CLOCK_NETWORK_COOLDOWN_MS;
+        burst_end_ms + CLOCK_NETWORK_COOLDOWN_MS;
     REQUIRE(clock_network_retry_cooldown_is_expired(&state,
                                                      cooldown_end_ms));
     clock_network_retry_start_burst(&state, cooldown_end_ms);
@@ -161,8 +142,21 @@ void test_reconnect_burst_and_cooldown_timeline()
     require_color(state.status, 0, 255, 255, 255, 3);
 }
 
-void test_success_during_each_attempt_resets_burst()
+void test_ethernet_and_wifi_reconnect_bursts()
 {
+    require_reconnect_burst_and_cooldown_timeline(
+        CLOCK_NETWORK_MODE_ETHERNET,
+        CLOCK_NETWORK_INTERFACE_ETHERNET);
+    require_reconnect_burst_and_cooldown_timeline(
+        CLOCK_NETWORK_MODE_WIFI,
+        CLOCK_NETWORK_INTERFACE_WIFI);
+}
+
+void require_success_during_each_attempt_resets_burst(
+    clock_network_mode_t mode,
+    clock_network_interface_t expected_interface)
+{
+    REQUIRE_EQ(clock_network_selected_interface(mode), expected_interface);
     for (uint8_t success_attempt = 1;
          success_attempt <= CLOCK_NETWORK_ATTEMPTS_PER_BURST;
          ++success_attempt) {
@@ -182,8 +176,7 @@ void test_success_during_each_attempt_resets_burst()
             REQUIRE_EQ(clock_network_retry_begin_attempt(&state), attempt);
 
             if (attempt == success_attempt) {
-                const uint64_t success_ms =
-                    attempt_ms + (attempt == 4 ? 3000ULL : 4000ULL);
+                const uint64_t success_ms = attempt_ms + 4000ULL;
                 REQUIRE(!clock_network_retry_burst_is_exhausted(&state,
                                                                  success_ms));
                 clock_network_retry_connected(&state);
@@ -205,9 +198,19 @@ void test_success_during_each_attempt_resets_burst()
     }
 }
 
+void test_ethernet_and_wifi_success_resets_burst()
+{
+    require_success_during_each_attempt_resets_burst(
+        CLOCK_NETWORK_MODE_ETHERNET,
+        CLOCK_NETWORK_INTERFACE_ETHERNET);
+    require_success_during_each_attempt_resets_burst(
+        CLOCK_NETWORK_MODE_WIFI,
+        CLOCK_NETWORK_INTERFACE_WIFI);
+}
+
 void test_duplicate_failures_do_not_consume_attempts()
 {
-    const uint8_t attempts_with_duplicate_events[] = {1, 3, 4};
+    const uint8_t attempts_with_duplicate_events[] = {1, 2, 3};
 
     for (uint8_t duplicate_attempt : attempts_with_duplicate_events) {
         clock_network_retry_state_t state = {};
@@ -265,13 +268,14 @@ void test_reconnect_bursts_repeat_indefinitely()
         REQUIRE_EQ(state.next_action_ms, final_attempt_start_ms);
         REQUIRE(clock_network_retry_attempt_is_due(
             &state, final_attempt_start_ms));
-        REQUIRE_EQ(clock_network_retry_begin_attempt(&state), 4);
+        REQUIRE_EQ(clock_network_retry_begin_attempt(&state), 3);
         REQUIRE(!state.attempt_complete);
         REQUIRE_EQ(state.status, CLOCK_NETWORK_CONNECTING);
 
-        const uint64_t final_failure_ms = final_attempt_start_ms + 2500;
+        const uint64_t final_failure_ms =
+            burst_start_ms + CLOCK_NETWORK_BURST_DURATION_MS;
         REQUIRE(!clock_network_retry_burst_is_exhausted(
-            &state, final_failure_ms));
+            &state, final_failure_ms - 1));
         clock_network_retry_attempt_failed(&state);
         REQUIRE(clock_network_retry_burst_is_exhausted(&state,
                                                         final_failure_ms));
@@ -376,8 +380,8 @@ void test_connecting_blink_boundaries()
 
 int main()
 {
-    test_reconnect_burst_and_cooldown_timeline();
-    test_success_during_each_attempt_resets_burst();
+    test_ethernet_and_wifi_reconnect_bursts();
+    test_ethernet_and_wifi_success_resets_burst();
     test_duplicate_failures_do_not_consume_attempts();
     test_reconnect_bursts_repeat_indefinitely();
     test_upper_right_coordinates_and_colors();

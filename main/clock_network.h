@@ -11,8 +11,9 @@
 extern "C" {
 #endif
 
+#define CLOCK_NETWORK_MODE_LEGACY_AUTO_VALUE 0U
+
 typedef enum {
-    CLOCK_NETWORK_MODE_AUTO = 0,
     CLOCK_NETWORK_MODE_ETHERNET = 1,
     CLOCK_NETWORK_MODE_WIFI = 2,
 } clock_network_mode_t;
@@ -30,11 +31,13 @@ typedef enum {
 } clock_network_status_t;
 
 #define CLOCK_NETWORK_RETRY_SLOT_MS (20UL * 1000UL)
-#define CLOCK_NETWORK_ATTEMPTS_PER_BURST 4U
+#define CLOCK_NETWORK_ATTEMPTS_PER_BURST 3U
 #define CLOCK_NETWORK_COOLDOWN_MS (5UL * 60UL * 1000UL)
 #define CLOCK_NETWORK_FINAL_ATTEMPT_START_MS                         \
     (CLOCK_NETWORK_RETRY_SLOT_MS *                                  \
      (CLOCK_NETWORK_ATTEMPTS_PER_BURST - 1U))
+#define CLOCK_NETWORK_BURST_DURATION_MS                              \
+    (CLOCK_NETWORK_RETRY_SLOT_MS * CLOCK_NETWORK_ATTEMPTS_PER_BURST)
 
 typedef struct {
     clock_network_status_t status;
@@ -83,10 +86,8 @@ bool clock_network_result_gate_finish_startup(
     size_t message_capacity,
     uint32_t *duration_ms);
 
-clock_network_interface_t clock_network_first_interface(clock_network_mode_t mode);
-clock_network_interface_t clock_network_fallback_interface(
-    clock_network_mode_t mode,
-    clock_network_interface_t failed_interface);
+clock_network_interface_t clock_network_selected_interface(
+    clock_network_mode_t mode);
 
 bool clock_network_service_guard_try_start(clock_network_service_guard_t *guard);
 bool clock_network_long_hold_update(clock_network_long_hold_t *state,

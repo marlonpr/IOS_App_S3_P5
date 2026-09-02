@@ -22,20 +22,10 @@ config ESP_WIFI_PASSWORD
     help
 	Password used by Wi-Fi station mode. It is never written to firmware logs.
 
-config CLOCK_NETWORK_AUTO_ETH_TIMEOUT_MS
-    int "Auto mode Ethernet timeout (ms)"
-    range 1000 60000
-    default 9000
-
 config CLOCK_NETWORK_ETH_TIMEOUT_MS
     int "Ethernet-only timeout (ms)"
     range 1000 60000
     default 15000
-
-config CLOCK_NETWORK_AUTO_WIFI_TIMEOUT_MS
-    int "Auto fallback Wi-Fi timeout (ms)"
-    range 1000 60000
-    default 18000
 
 config CLOCK_NETWORK_WIFI_TIMEOUT_MS
     int "Wi-Fi-only timeout (ms)"

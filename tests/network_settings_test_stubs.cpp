@@ -16,6 +16,7 @@ struct Handle {
 std::map<std::string, unsigned char> s_values;
 std::map<nvs_handle_t, Handle> s_handles;
 nvs_handle_t s_next_handle = 1;
+int s_network_mode_write_count = 0;
 
 std::string storage_key(const Handle &handle, const char *key)
 {
@@ -29,11 +30,23 @@ void network_settings_test_reset(void)
     s_values.clear();
     s_handles.clear();
     s_next_handle = 1;
+    s_network_mode_write_count = 0;
 }
 
 void network_settings_test_store_raw(unsigned char value)
 {
     s_values["clock_cfg/network_mode"] = value;
+}
+
+unsigned char network_settings_test_read_raw(void)
+{
+    const auto value = s_values.find("clock_cfg/network_mode");
+    return value == s_values.end() ? 0xff : value->second;
+}
+
+int network_settings_test_network_mode_write_count(void)
+{
+    return s_network_mode_write_count;
 }
 
 const char *esp_err_to_name(esp_err_t code)
@@ -121,7 +134,11 @@ esp_err_t nvs_set_u8(nvs_handle_t handle,
         return ESP_ERR_INVALID_ARG;
     }
 
-    s_values[storage_key(handle_it->second, key)] = value;
+    const std::string key_name = storage_key(handle_it->second, key);
+    s_values[key_name] = value;
+    if (key_name == "clock_cfg/network_mode") {
+        ++s_network_mode_write_count;
+    }
     return ESP_OK;
 }
 

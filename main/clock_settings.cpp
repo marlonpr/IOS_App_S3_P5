@@ -4,6 +4,8 @@
 #include "nvs_flash.h"
 #include "nvs.h"
 
+#include "clock_network.h"
+
 static const char *TAG = "CLOCK_SETTINGS";
 
 #define NVS_NAMESPACE      "clock_cfg"
@@ -330,7 +332,8 @@ uint8_t clock_settings_load_brightness(uint8_t default_brightness_level)
 
 esp_err_t clock_settings_save_network_mode(uint8_t network_mode)
 {
-    if (network_mode > 2) {
+    if (network_mode != CLOCK_NETWORK_MODE_ETHERNET &&
+        network_mode != CLOCK_NETWORK_MODE_WIFI) {
         ESP_LOGE(TAG, "Rejecting invalid network mode %u", network_mode);
         return ESP_ERR_INVALID_ARG;
     }
@@ -345,14 +348,47 @@ esp_err_t clock_settings_save_network_mode(uint8_t network_mode)
 
 uint8_t clock_settings_load_network_mode(void)
 {
-    const uint8_t value = load_u8_value(NVS_KEY_NETWORK_MODE, 0);
-    if (value > 2) {
+    constexpr uint8_t kDefaultMode = CLOCK_NETWORK_MODE_WIFI;
+    nvs_handle_t handle;
+    uint8_t value = kDefaultMode;
+
+    esp_err_t result = nvs_open(NVS_NAMESPACE, NVS_READONLY, &handle);
+    if (result != ESP_OK) {
         ESP_LOGW(TAG,
-                 "Invalid network mode %u in NVS; using Auto",
-                 value);
-        return 0;
+                 "No NVS namespace, using default network mode=%u",
+                 kDefaultMode);
+        return kDefaultMode;
     }
 
-    ESP_LOGI(TAG, "Loaded network mode=%u", value);
-    return value;
+    result = nvs_get_u8(handle, NVS_KEY_NETWORK_MODE, &value);
+    nvs_close(handle);
+    if (result != ESP_OK) {
+        ESP_LOGW(TAG,
+                 "Network mode not found, using default network mode=%u",
+                 kDefaultMode);
+        return kDefaultMode;
+    }
+
+    if (value == CLOCK_NETWORK_MODE_ETHERNET ||
+        value == CLOCK_NETWORK_MODE_WIFI) {
+        ESP_LOGI(TAG, "Loaded network mode=%u", value);
+        return value;
+    }
+
+    if (value == CLOCK_NETWORK_MODE_LEGACY_AUTO_VALUE) {
+        ESP_LOGW(TAG, "Legacy AUTO network mode migrated to Wi-Fi");
+    } else {
+        ESP_LOGW(TAG,
+                 "Invalid network mode %u in NVS; using Wi-Fi",
+                 value);
+    }
+
+    result = clock_settings_save_network_mode(kDefaultMode);
+    if (result != ESP_OK) {
+        ESP_LOGE(TAG,
+                 "Failed to persist migrated network mode: %s",
+                 esp_err_to_name(result));
+    }
+
+    return kDefaultMode;
 }
