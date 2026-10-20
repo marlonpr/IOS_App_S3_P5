@@ -6,6 +6,7 @@
 #include "freertos/task.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "esp_netif_ip_addr.h"
 
 #include "ds3231.h"
 #include "led_panel.h"
@@ -18,6 +19,7 @@
 #include "clock_menu.h"
 #include "clock_ethernet.h"
 #include "clock_network.h"
+#include "clock_network_diag.h"
 #include "clock_alarm.h"
 #include "clock_protocol.h"
 #include "clock_modes.h"
@@ -65,6 +67,8 @@ static char g_next_message[32] = {0};
 static bool g_next_message_pending = false;
 static uint32_t g_next_message_duration_ms = 0;
 static clock_network_result_gate_t g_network_result_gate = {};
+
+static clock_network_diag_state_t g_network_diag_state = {};
 
 
 static int brightness_level = 5;        // 1 to 10
@@ -292,6 +296,7 @@ void display_update_task(void* pvParameters)
 	bool startup_screen_active_copy;
 	
 	bool logo_screen_active_copy;
+	bool network_diag_active_copy;
 	clock_network_mode_t saved_network_mode_copy;
 
     while (true) {
@@ -460,6 +465,8 @@ void display_update_task(void* pvParameters)
 		message_active_copy = g_message_active;
 		snprintf(message_copy, sizeof(message_copy), "%s", g_message);
 		saved_network_mode_copy = g_saved_network_mode;
+		network_diag_active_copy =
+		    clock_network_diag_is_active(&g_network_diag_state);
 		
 		logo_screen_active_copy = g_logo_screen_active;
 
@@ -525,6 +532,39 @@ void display_update_task(void* pvParameters)
 		    continue;
 		}		
 		
+		if (network_diag_active_copy) {
+		    scroll_stop();
+
+		    uint32_t local_ipv4 = 0;
+		    const bool has_ip = clock_network_get_diagnostic_ipv4(&local_ipv4);
+		    const clock_network_interface_t active_interface =
+		        clock_network_get_active_interface();
+
+		    const char *interface_label = "NET";
+		    if (active_interface == CLOCK_NETWORK_INTERFACE_WIFI) {
+		        interface_label = "WIFI";
+		    } else if (active_interface == CLOCK_NETWORK_INTERFACE_ETHERNET) {
+		        interface_label = "ETH";
+		    } else if (saved_network_mode_copy == CLOCK_NETWORK_MODE_WIFI) {
+		        interface_label = "WIFI";
+		    } else if (saved_network_mode_copy == CLOCK_NETWORK_MODE_ETHERNET) {
+		        interface_label = "ETH";
+		    }
+
+		    char ip_text[16] = {};
+		    if (has_ip) {
+		        const esp_ip4_addr_t address = {.addr = local_ipv4};
+		        snprintf(ip_text, sizeof(ip_text), IPSTR, IP2STR(&address));
+		    }
+
+		    clock_display_draw_network_ip_screen(
+		        driver, interface_label, has_ip ? ip_text : nullptr);
+		    present_display_frame(driver);
+
+		    vTaskDelayUntil(&xLastWakeTime, xFrequency);
+		    continue;
+		}
+
 		if (message_active_copy) {
 		    scroll_stop();
 		    draw_temp_message(driver, message_copy);
@@ -887,7 +927,7 @@ static esp_err_t save_network_mode_callback(uint8_t mode, void *)
     return clock_settings_save_network_mode(mode);
 }
 
-static void handle_network_mode_long_hold(void)
+static void apply_network_mode_switch(void)
 {
     clock_network_mode_t current_mode;
 
@@ -921,6 +961,33 @@ static void handle_network_mode_long_hold(void)
     ESP_LOGI(TAG,
              "Saved network boot mode changed to %s; live interfaces unchanged",
              clock_network_mode_label(new_mode));
+}
+
+static void handle_network_mode_long_hold(uint32_t now_ms)
+{
+    portENTER_CRITICAL(&g_data_mux);
+    clock_network_diag_enter(&g_network_diag_state, now_ms);
+    portEXIT_CRITICAL(&g_data_mux);
+
+    uint32_t local_ipv4 = 0;
+    const bool has_ip = clock_network_get_diagnostic_ipv4(&local_ipv4);
+    const clock_network_interface_t interface =
+        clock_network_get_active_interface();
+
+    if (has_ip) {
+        const esp_ip4_addr_t address = {.addr = local_ipv4};
+        ESP_LOGI(TAG,
+                 "Network diagnostic screen opened: interface=%s ip=" IPSTR
+                 "; press DOWN to change saved mode, MENU/UP to exit, timeout=%u s",
+                 interface == CLOCK_NETWORK_INTERFACE_ETHERNET ? "Ethernet" :
+                 interface == CLOCK_NETWORK_INTERFACE_WIFI ? "Wi-Fi" : "None",
+                 IP2STR(&address),
+                 static_cast<unsigned>(CLOCK_NETWORK_DIAG_TIMEOUT_MS / 1000U));
+    } else {
+        ESP_LOGI(TAG,
+                 "Network diagnostic screen opened: NO IP; press DOWN to change saved mode, MENU/UP to exit, timeout=%u s",
+                 static_cast<unsigned>(CLOCK_NETWORK_DIAG_TIMEOUT_MS / 1000U));
+    }
 }
 
 static void handle_normal_button(button_t btn)
@@ -970,6 +1037,17 @@ void button_task(void *arg)
 
         const uint32_t now_ms =
             static_cast<uint32_t>(xTaskGetTickCount() * portTICK_PERIOD_MS);
+
+        clock_network_diag_action_t diag_timeout_action;
+        portENTER_CRITICAL(&g_data_mux);
+        diag_timeout_action =
+            clock_network_diag_poll(&g_network_diag_state, now_ms);
+        portEXIT_CRITICAL(&g_data_mux);
+        if (diag_timeout_action == CLOCK_NETWORK_DIAG_ACTION_TIMEOUT) {
+            ESP_LOGI(TAG,
+                     "Network diagnostic screen timed out; saved network mode unchanged");
+        }
+
         int raw_levels[kButtonCount];
 
         for (size_t slot = 0; slot < kButtonCount; ++slot) {
@@ -1013,6 +1091,31 @@ void button_task(void *arg)
 #if CONFIG_CLOCK_BUTTON_DEBUG
                 ESP_LOGI(TAG, "decoded press: %s", clock_button_name(btn));
 #endif
+                clock_network_diag_action_t diag_action;
+                portENTER_CRITICAL(&g_data_mux);
+                diag_action = clock_network_diag_handle_press(
+                    &g_network_diag_state, btn);
+                portEXIT_CRITICAL(&g_data_mux);
+
+                if (diag_action != CLOCK_NETWORK_DIAG_ACTION_NONE) {
+                    /* Consume this complete press so MENU/UP/DOWN cannot also
+                     * trigger their normal action after the diagnostic screen
+                     * closes. A new DOWN press is required after the 10 s hold. */
+                    states[slot].action_fired = true;
+                    menu_repeat_at_ms[slot] = 0;
+
+                    if (diag_action == CLOCK_NETWORK_DIAG_ACTION_SWITCH_MODE) {
+                        ESP_LOGI(TAG,
+                                 "DOWN pressed on network diagnostic screen; changing saved network mode");
+                        apply_network_mode_switch();
+                    } else {
+                        ESP_LOGI(TAG,
+                                 "%s pressed on network diagnostic screen; exiting without changing saved network mode",
+                                 clock_button_name(btn));
+                    }
+                    continue;
+                }
+
                 if (clock_menu_is_active()) {
 #if CONFIG_CLOCK_BUTTON_DEBUG
                     ESP_LOGI(TAG, "short press action: %s", clock_button_name(btn));
@@ -1056,7 +1159,7 @@ void button_task(void *arg)
                 ESP_LOGI(TAG, "long action: %s", clock_button_name(btn));
 #endif
                 if (btn == BTN_DOWN) {
-                    handle_network_mode_long_hold();
+                    handle_network_mode_long_hold(now_ms);
                 }
             }
         }

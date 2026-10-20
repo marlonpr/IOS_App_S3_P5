@@ -4,6 +4,7 @@
 #include "clock_buttons.h"
 #include "clock_button_logic.h"
 #include "clock_menu_model.h"
+#include "clock_network_diag.h"
 
 #define REQUIRE(expression)                                                   \
     do {                                                                      \
@@ -93,6 +94,47 @@ static void test_up_and_down_states_are_independent()
     REQUIRE(update(&down, 1, 11001, 0, 10000) == CLOCK_BUTTON_EVENT_RELEASE);
 }
 
+
+static void test_network_diag_requires_second_down_press_to_switch()
+{
+    clock_network_diag_state_t diag = {};
+    clock_network_diag_enter(&diag, 1000);
+    REQUIRE(clock_network_diag_is_active(&diag));
+    REQUIRE(clock_network_diag_poll(&diag, 20999) ==
+            CLOCK_NETWORK_DIAG_ACTION_NONE);
+
+    REQUIRE(clock_network_diag_handle_press(&diag, BTN_DOWN) ==
+            CLOCK_NETWORK_DIAG_ACTION_SWITCH_MODE);
+    REQUIRE(!clock_network_diag_is_active(&diag));
+}
+
+static void test_network_diag_other_buttons_exit_without_switch()
+{
+    clock_network_diag_state_t diag = {};
+
+    clock_network_diag_enter(&diag, 0);
+    REQUIRE(clock_network_diag_handle_press(&diag, BTN_MENU) ==
+            CLOCK_NETWORK_DIAG_ACTION_EXIT);
+    REQUIRE(!clock_network_diag_is_active(&diag));
+
+    clock_network_diag_enter(&diag, 0);
+    REQUIRE(clock_network_diag_handle_press(&diag, BTN_UP) ==
+            CLOCK_NETWORK_DIAG_ACTION_EXIT);
+    REQUIRE(!clock_network_diag_is_active(&diag));
+}
+
+static void test_network_diag_times_out_without_mode_switch()
+{
+    clock_network_diag_state_t diag = {};
+    clock_network_diag_enter(&diag, 500);
+
+    REQUIRE(clock_network_diag_poll(&diag, 20499) ==
+            CLOCK_NETWORK_DIAG_ACTION_NONE);
+    REQUIRE(clock_network_diag_poll(&diag, 20500) ==
+            CLOCK_NETWORK_DIAG_ACTION_TIMEOUT);
+    REQUIRE(!clock_network_diag_is_active(&diag));
+}
+
 static void test_format_is_reachable_from_menu()
 {
     REQUIRE(clock_menu_next_field(CLOCK_MENU_FIELD_BRIGHTNESS) ==
@@ -110,6 +152,9 @@ int main()
     test_down_ten_second_hold_is_one_shot_long_action();
     test_down_short_press_is_available_to_menu_only();
     test_up_and_down_states_are_independent();
+    test_network_diag_requires_second_down_press_to_switch();
+    test_network_diag_other_buttons_exit_without_switch();
+    test_network_diag_times_out_without_mode_switch();
     test_format_is_reachable_from_menu();
     std::puts("button logic tests passed");
     return 0;

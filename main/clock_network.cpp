@@ -42,6 +42,7 @@ uint8_t s_retry_attempt = 0;
 bool s_task_started = false;
 bool s_services_started = false;
 bool s_shared_services_started_once = false;
+uint32_t s_local_ipv4 = 0;
 uint32_t s_pending_events = 0;
 bool s_pending_loss_was_online = false;
 TaskHandle_t s_supervisor_task = nullptr;
@@ -109,6 +110,13 @@ void set_active_interface(clock_network_interface_t interface)
 {
     portENTER_CRITICAL(&s_state_lock);
     s_active_interface = static_cast<int>(interface);
+    portEXIT_CRITICAL(&s_state_lock);
+}
+
+void set_local_ipv4(uint32_t address)
+{
+    portENTER_CRITICAL(&s_state_lock);
+    s_local_ipv4 = address;
     portEXIT_CRITICAL(&s_state_lock);
 }
 
@@ -202,6 +210,7 @@ void network_interface_event(clock_network_interface_event_t event,
             return;
         }
 
+        set_local_ipv4(detail);
         set_network_status(CLOCK_NETWORK_ONLINE);
         set_retry_attempt(0);
         portENTER_CRITICAL(&s_state_lock);
@@ -222,6 +231,7 @@ void network_interface_event(clock_network_interface_event_t event,
         return;
     }
 
+    set_local_ipv4(0);
     const clock_network_status_t status = clock_network_get_status();
     const bool loss_was_online = status == CLOCK_NETWORK_ONLINE;
     if (loss_was_online) {
@@ -611,6 +621,7 @@ esp_err_t clock_network_start(clock_network_mode_t boot_mode,
 
     set_boot_mode(boot_mode);
     set_active_interface(CLOCK_NETWORK_INTERFACE_NONE);
+    set_local_ipv4(0);
     set_retry_attempt(0);
     set_services_started(false);
     s_rx_callback = rx_callback;
@@ -671,4 +682,36 @@ bool clock_network_services_started(void)
     const bool started = s_services_started;
     portEXIT_CRITICAL(&s_state_lock);
     return started;
+}
+
+bool clock_network_get_local_ipv4(uint32_t *address)
+{
+    if (address == nullptr) {
+        return false;
+    }
+
+    portENTER_CRITICAL(&s_state_lock);
+    const uint32_t current = s_local_ipv4;
+    portEXIT_CRITICAL(&s_state_lock);
+
+    *address = current;
+    return current != 0;
+}
+
+bool clock_network_get_diagnostic_ipv4(uint32_t *address)
+{
+    if (address == nullptr) {
+        return false;
+    }
+
+    switch (clock_network_get_active_interface()) {
+        case CLOCK_NETWORK_INTERFACE_WIFI:
+            return clock_wifi_get_diagnostic_ipv4(address);
+        case CLOCK_NETWORK_INTERFACE_ETHERNET:
+            return clock_ethernet_get_local_ipv4(address);
+        case CLOCK_NETWORK_INTERFACE_NONE:
+        default:
+            *address = 0;
+            return false;
+    }
 }

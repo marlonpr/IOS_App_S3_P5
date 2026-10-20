@@ -142,6 +142,48 @@ void require_reconnect_burst_and_cooldown_timeline(
     require_color(state.status, 0, 255, 255, 255, 3);
 }
 
+void test_factory_ipv4_policy()
+{
+    constexpr uint32_t expected_network = 0xC0A80000U;  // 192.168.0.0
+    constexpr uint32_t expected_netmask = 0xFFFF0000U;  // 255.255.0.0
+    constexpr uint32_t expected_gateway = 0xC0A80001U;  // 192.168.0.1
+
+    REQUIRE(clock_network_ipv4_matches_policy(
+        0xC0A8057BU,  // 192.168.5.123
+        0xFFFF0000U,
+        0xC0A80001U,
+        expected_network, expected_netmask, expected_gateway));
+    REQUIRE(clock_network_ipv4_matches_policy(
+        0xC0A8FE01U,  // 192.168.254.1
+        0xFFFF0000U,
+        0xC0A80001U,
+        expected_network, expected_netmask, expected_gateway));
+
+    REQUIRE(!clock_network_ipv4_matches_policy(
+        0x0A2D006AU,  // 10.45.0.106
+        0xFFFF0000U,
+        0x0A2D00F5U,
+        expected_network, expected_netmask, expected_gateway));
+    REQUIRE(!clock_network_ipv4_matches_policy(
+        0xC0A8057BU,
+        0xFFFFFF00U,  // wrong /24 mask
+        0xC0A80001U,
+        expected_network, expected_netmask, expected_gateway));
+    REQUIRE(!clock_network_ipv4_matches_policy(
+        0xC0A8057BU,
+        0xFFFF0000U,
+        0xC0A80101U,  // wrong gateway
+        expected_network, expected_netmask, expected_gateway));
+
+    // The policy is not tied to 192.168.0.0/16. A future menuconfig
+    // setting such as 10.20.0.0/16 with gateway 10.20.0.1 works too.
+    REQUIRE(clock_network_ipv4_matches_policy(
+        0x0A14052AU,  // 10.20.5.42
+        0xFFFF0000U,
+        0x0A140001U,
+        0x0A140000U, 0xFFFF0000U, 0x0A140001U));
+}
+
 void test_ethernet_and_wifi_reconnect_bursts()
 {
     require_reconnect_burst_and_cooldown_timeline(
@@ -380,6 +422,7 @@ void test_connecting_blink_boundaries()
 
 int main()
 {
+    test_factory_ipv4_policy();
     test_ethernet_and_wifi_reconnect_bursts();
     test_ethernet_and_wifi_success_resets_burst();
     test_duplicate_failures_do_not_consume_attempts();

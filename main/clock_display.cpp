@@ -1,6 +1,7 @@
 #include "clock_display.h"
 
 #include <stdio.h>
+#include <string.h>
 
 #include "esp_timer.h"
 #include "led_panel.h"
@@ -740,6 +741,79 @@ void clock_display_draw_logo(Hub75Driver *driver)
                       CLOCK_LOGO_HEIGHT);
 
     clock_logo_unlock_pixels();
+}
+
+void clock_display_draw_network_ip_screen(Hub75Driver *driver,
+                                          const char *interface_label,
+                                          const char *ip_text)
+{
+    if (driver == nullptr) {
+        return;
+    }
+
+    const char *label =
+        interface_label != nullptr && interface_label[0] != '\0'
+            ? interface_label
+            : "NET";
+
+    char header[16];
+    snprintf(header, sizeof(header), "%s IP", label);
+    draw_string_5x7(*driver,
+                    clock_display_center_x_5x7(header),
+                    1,
+                    header,
+                    0,
+                    255,
+                    255);
+
+    if (ip_text == nullptr || ip_text[0] == '\0') {
+        draw_string_5x7(*driver,
+                        clock_display_center_x_5x7("NO IP"),
+                        15,
+                        "NO IP",
+                        255,
+                        0,
+                        0);
+        return;
+    }
+
+    /* Split after the second dot so even 255.255.255.255 fits on 64 pixels. */
+    const char *first_dot = strchr(ip_text, '.');
+    const char *second_dot =
+        first_dot != nullptr ? strchr(first_dot + 1, '.') : nullptr;
+
+    char line1[12] = {};
+    char line2[12] = {};
+
+    if (second_dot != nullptr) {
+        size_t first_len = static_cast<size_t>(second_dot - ip_text);
+        if (first_len >= sizeof(line1)) {
+            first_len = sizeof(line1) - 1;
+        }
+        memcpy(line1, ip_text, first_len);
+        line1[first_len] = '\0';
+        snprintf(line2, sizeof(line2), "%s", second_dot + 1);
+    } else {
+        snprintf(line1, sizeof(line1), "%s", ip_text);
+    }
+
+    draw_string_5x7(*driver,
+                    clock_display_center_x_5x7(line1),
+                    11,
+                    line1,
+                    0,
+                    255,
+                    0);
+
+    if (line2[0] != '\0') {
+        draw_string_5x7(*driver,
+                        clock_display_center_x_5x7(line2),
+                        21,
+                        line2,
+                        0,
+                        255,
+                        0);
+    }
 }
 
 void clock_display_draw_network_status_overlay(Hub75Driver *driver)

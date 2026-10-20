@@ -33,6 +33,8 @@ bool clock_ethernet_wait_for_ip(uint32_t timeout_ms);
 
 /* True when IP, gateway, and DNS are available for routed OTA traffic. */
 bool clock_ethernet_route_is_ready(void);
+/* Current Ethernet IPv4 address, if one is assigned. */
+bool clock_ethernet_get_local_ipv4(uint32_t *address);
 
 /* Stop the W5500 driver after a bounded boot attempt. */
 esp_err_t clock_ethernet_stop(void);

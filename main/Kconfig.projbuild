@@ -22,6 +22,28 @@ config ESP_WIFI_PASSWORD
     help
 	Password used by Wi-Fi station mode. It is never written to firmware logs.
 
+config CLOCK_WIFI_EXPECTED_NETWORK
+    string "Accepted Wi-Fi IPv4 network"
+    default "192.168.0.0"
+    help
+	Network address that DHCP leases must belong to before Wi-Fi is considered
+	online. Enter the network base address, not a host address. Example:
+	192.168.0.0.
+
+config CLOCK_WIFI_EXPECTED_NETMASK
+    string "Accepted Wi-Fi IPv4 netmask"
+    default "255.255.0.0"
+    help
+	Exact IPv4 netmask required for an accepted DHCP lease. Example:
+	255.255.0.0.
+
+config CLOCK_WIFI_EXPECTED_GATEWAY
+    string "Accepted Wi-Fi IPv4 gateway"
+    default "192.168.0.1"
+    help
+	Exact IPv4 default gateway required for an accepted DHCP lease. Example:
+	192.168.0.1.
+
 config CLOCK_NETWORK_ETH_TIMEOUT_MS
     int "Ethernet-only timeout (ms)"
     range 1000 60000

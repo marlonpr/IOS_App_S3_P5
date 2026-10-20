@@ -89,6 +89,16 @@ bool clock_network_result_gate_finish_startup(
 clock_network_interface_t clock_network_selected_interface(
     clock_network_mode_t mode);
 
+// IPv4 values are supplied in host byte order (for example 0xC0A8057B
+// for 192.168.5.123). The expected network, netmask, and gateway are
+// provided by the caller so the Wi-Fi LAN policy can be configured.
+bool clock_network_ipv4_matches_policy(uint32_t ip,
+                                       uint32_t netmask,
+                                       uint32_t gateway,
+                                       uint32_t expected_network,
+                                       uint32_t expected_netmask,
+                                       uint32_t expected_gateway);
+
 bool clock_network_service_guard_try_start(clock_network_service_guard_t *guard);
 bool clock_network_long_hold_update(clock_network_long_hold_t *state,
                                     bool pressed,
@@ -129,6 +139,12 @@ clock_network_mode_t clock_network_get_boot_mode(void);
 clock_network_interface_t clock_network_get_active_interface(void);
 clock_network_status_t clock_network_get_status(void);
 bool clock_network_services_started(void);
+
+/* Returns the last accepted local IPv4 address for the active interface. */
+bool clock_network_get_local_ipv4(uint32_t *address);
+/* Diagnostic IPv4: Wi-Fi returns the latest DHCP lease even while a bad
+ * lease is being rejected/retried; Ethernet returns its current address. */
+bool clock_network_get_diagnostic_ipv4(uint32_t *address);
 
 #ifdef __cplusplus
 }

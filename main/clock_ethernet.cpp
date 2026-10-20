@@ -823,6 +823,23 @@ bool clock_ethernet_route_is_ready(void)
            dns_info.ip.u_addr.ip4.addr != 0;
 }
 
+bool clock_ethernet_get_local_ipv4(uint32_t *address)
+{
+    if (address == NULL || s_eth_netif == NULL) {
+        return false;
+    }
+
+    esp_netif_ip_info_t ip_info = {};
+    if (esp_netif_get_ip_info(s_eth_netif, &ip_info) != ESP_OK ||
+        ip_info.ip.addr == 0) {
+        *address = 0;
+        return false;
+    }
+
+    *address = ip_info.ip.addr;
+    return true;
+}
+
 esp_err_t clock_ethernet_stop(void)
 {
     if (s_eth_handle == NULL) {

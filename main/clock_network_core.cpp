@@ -134,6 +134,18 @@ clock_network_interface_t clock_network_selected_interface(
     return CLOCK_NETWORK_INTERFACE_ETHERNET;
 }
 
+bool clock_network_ipv4_matches_policy(uint32_t ip,
+                                       uint32_t netmask,
+                                       uint32_t gateway,
+                                       uint32_t expected_network,
+                                       uint32_t expected_netmask,
+                                       uint32_t expected_gateway)
+{
+    return netmask == expected_netmask &&
+           gateway == expected_gateway &&
+           (ip & expected_netmask) == expected_network;
+}
+
 bool clock_network_service_guard_try_start(clock_network_service_guard_t *guard)
 {
     if (guard == nullptr || guard->started) {
