@@ -20,3 +20,20 @@ Defaults are `192.168.0.0`, `255.255.0.0`, and `192.168.0.1`. See
 ## Network IP diagnostic screen
 
 Hold **DOWN** for 10 seconds to display the current Wi-Fi/Ethernet IPv4 address for up to 20 seconds. Press **DOWN** once on that screen to change the saved network boot mode; press **MENU** or **UP**, or wait 20 seconds, to exit without changing network mode. See `NETWORK_IP_DIAGNOSTIC.md` for details.
+
+## Logo display duration and five-frame playback
+
+The saved **Logo seconds** setting controls the entire logo slot for both a
+single image and a five-frame sequence, in fixed and rotation display modes.
+Each sequence frame lasts 3 seconds and the sequence repeats until that slot
+expires. Playback stops at the configured timeout, without waiting for the
+current frame or 15-second cycle to finish. Each new logo slot starts at frame 1.
+
+For example, **Logo seconds = 1000** and **Mode seconds = 45** plays 66 complete
+15-second cycles, then 10 seconds of the next cycle. The display
+then switches to the normal screen for the configured mode interval. In rotation
+mode, each of the three normal screens gets its own mode interval.
+
+The controller uploads exactly five PNG images in filename order. The firmware
+also accepts existing four-frame sequences, so a saved sequence keeps working
+after the firmware update until it is replaced by a new upload.

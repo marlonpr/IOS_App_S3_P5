@@ -1,10 +1,12 @@
 #include <cstring>
+#include <cstdint>
 #include <map>
 #include <set>
 #include <string>
 #include <vector>
 
 #include "esp_err.h"
+#include "clock_logo_manager.h"
 #include "nvs.h"
 #include "nvs_flash.h"
 
@@ -25,6 +27,7 @@ int s_set_count = 0;
 int s_commit_count = 0;
 int64_t s_now_us = 1000000;
 int s_scroll_stop_count = 0;
+int s_logo_restart_count = 0;
 
 std::vector<uint8_t> encode_u16(uint16_t value)
 {
@@ -85,6 +88,7 @@ void interval_test_reset_environment(void)
     s_commit_count = 0;
     s_now_us = 1000000;
     s_scroll_stop_count = 0;
+    s_logo_restart_count = 0;
 }
 
 void interval_test_reset_counters(void)
@@ -92,6 +96,7 @@ void interval_test_reset_counters(void)
     s_set_count = 0;
     s_commit_count = 0;
     s_scroll_stop_count = 0;
+    s_logo_restart_count = 0;
 }
 
 void interval_test_store_u16(const char *key, uint16_t value)
@@ -129,9 +134,19 @@ void interval_test_advance_time_us(int64_t delta_us)
     s_now_us += delta_us;
 }
 
+int interval_test_logo_restart_count(void)
+{
+    return s_logo_restart_count;
+}
+
 int64_t esp_timer_get_time(void)
 {
     return s_now_us;
+}
+
+void clock_logo_restart_sequence(void)
+{
+    s_logo_restart_count++;
 }
 
 void scroll_stop(void)

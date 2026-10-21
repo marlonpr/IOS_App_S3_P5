@@ -229,42 +229,6 @@ static bool send_error_line(int sock, const char *line)
     return send_all(sock, line);
 }
 
-static bool parse_header(const uint8_t header[20], uint32_t *expected_crc)
-{
-    if (memcmp(header, "LGO1", 4) != 0) {
-        return false;
-    }
-
-    uint16_t width = (uint16_t)header[4] | ((uint16_t)header[5] << 8);
-    uint16_t height = (uint16_t)header[6] | ((uint16_t)header[7] << 8);
-    uint8_t pixel_format = header[8];
-    uint8_t flags = header[9];
-    uint16_t reserved = (uint16_t)header[10] | ((uint16_t)header[11] << 8);
-    uint32_t payload_length = (uint32_t)header[12] |
-                              ((uint32_t)header[13] << 8) |
-                              ((uint32_t)header[14] << 16) |
-                              ((uint32_t)header[15] << 24);
-    uint32_t crc = (uint32_t)header[16] |
-                   ((uint32_t)header[17] << 8) |
-                   ((uint32_t)header[18] << 16) |
-                   ((uint32_t)header[19] << 24);
-
-    if (width != CLOCK_LOGO_WIDTH ||
-        height != CLOCK_LOGO_HEIGHT ||
-        pixel_format != 1 ||
-        flags != 0 ||
-        reserved != 0 ||
-        payload_length != CLOCK_LOGO_PAYLOAD_BYTES) {
-        return false;
-    }
-
-    if (expected_crc != nullptr) {
-        *expected_crc = crc;
-    }
-
-    return true;
-}
-
 static esp_err_t stage_logo_file()
 {
     unlink(kBackupPath);
@@ -299,8 +263,6 @@ static void rollback_logo_file()
 
 static void handle_client(int client_sock)
 {
-    constexpr size_t kHeaderSize = 20;
-    constexpr size_t kPayloadSize = CLOCK_LOGO_PAYLOAD_BYTES;
     constexpr size_t kChunkSize = 384;
 
     struct timeval timeout = {};
@@ -309,7 +271,7 @@ static void handle_client(int client_sock)
     setsockopt(client_sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
     setsockopt(client_sock, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
 
-    uint8_t header[kHeaderSize];
+    uint8_t header[CLOCK_LOGO_HEADER_BYTES];
     bool timed_out = false;
 
     if (!recv_exact(client_sock, header, sizeof(header), &timed_out)) {
@@ -317,8 +279,8 @@ static void handle_client(int client_sock)
         return;
     }
 
-    uint32_t expected_crc = 0;
-    if (!parse_header(header, &expected_crc)) {
+    clock_logo_file_info_t info = {};
+    if (!clock_logo_parse_file_header(header, &info)) {
         send_error_line(client_sock, "ERR HEADER\n");
         return;
     }
@@ -347,10 +309,10 @@ static void handle_client(int client_sock)
         err = ESP_FAIL;
     }
 
-    while (err == ESP_OK && payload_received < kPayloadSize) {
+    while (err == ESP_OK && payload_received < info.payload_length) {
         size_t want = kChunkSize;
-        if (want > (kPayloadSize - payload_received)) {
-            want = kPayloadSize - payload_received;
+        if (want > (info.payload_length - payload_received)) {
+            want = info.payload_length - payload_received;
         }
 
         timed_out = false;
@@ -406,7 +368,7 @@ static void handle_client(int client_sock)
 
     crc = clock_logo_crc32_finalize(crc);
 
-    if (crc != expected_crc) {
+    if (crc != info.payload_crc) {
         unlink(kTempPath);
         send_error_line(client_sock, "ERR CRC\n");
         return;

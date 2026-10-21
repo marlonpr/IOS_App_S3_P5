@@ -12,6 +12,7 @@ int interval_test_set_count(void);
 int interval_test_commit_count(void);
 void interval_test_set_time_us(int64_t now_us);
 void interval_test_advance_time_us(int64_t delta_us);
+int interval_test_logo_restart_count(void);
 
 namespace {
 
@@ -93,6 +94,114 @@ void test_rotation_sequence_uses_shared_intervals(void)
     REQUIRE_EQ(clock_modes_get_rotation_item(), ROT_ITEM_MODE_3);
     interval_test_advance_time_us(21000000);
     REQUIRE_EQ(clock_modes_get_rotation_item(), ROT_ITEM_LOGO);
+}
+
+void test_fixed_logo_uses_full_configured_duration(void)
+{
+    reset_with_missing_nvs();
+    const clock_mode_intervals_t custom = {1000, 45};
+    REQUIRE_EQ(clock_modes_set_intervals(&custom), ESP_OK);
+    interval_test_reset_counters();
+    interval_test_set_time_us(1000000);
+
+    REQUIRE_EQ(clock_modes_get_fixed_item(), FIXED_ITEM_LOGO);
+    REQUIRE_EQ(interval_test_logo_restart_count(), 1);
+    // Repeated polling across every frame/cycle must not restart playback
+    // or end the logo slot at the first 12-second cycle.
+    for (int64_t elapsed_us = 3000000; elapsed_us < 1000000000;
+         elapsed_us += 3000000) {
+        interval_test_set_time_us(1000000 + elapsed_us);
+        REQUIRE_EQ(clock_modes_get_fixed_item(), FIXED_ITEM_LOGO);
+    }
+    REQUIRE_EQ(interval_test_logo_restart_count(), 1);
+    interval_test_set_time_us(1000000 + 999999999LL);
+    REQUIRE_EQ(clock_modes_get_fixed_item(), FIXED_ITEM_LOGO);
+    interval_test_advance_time_us(1);
+    REQUIRE_EQ(clock_modes_get_fixed_item(), FIXED_ITEM_SCREEN);
+    REQUIRE_EQ(interval_test_logo_restart_count(), 1);
+    interval_test_advance_time_us(44999999);
+    REQUIRE_EQ(clock_modes_get_fixed_item(), FIXED_ITEM_SCREEN);
+    interval_test_advance_time_us(1);
+    REQUIRE_EQ(clock_modes_get_fixed_item(), FIXED_ITEM_LOGO);
+    REQUIRE_EQ(interval_test_logo_restart_count(), 2);
+}
+
+void test_rotation_logo_uses_full_configured_duration(void)
+{
+    reset_with_missing_nvs();
+    const clock_mode_intervals_t custom = {1000, 45};
+    REQUIRE_EQ(clock_modes_set_intervals(&custom), ESP_OK);
+    interval_test_reset_counters();
+    interval_test_set_time_us(1000000);
+
+    REQUIRE_EQ(clock_modes_get_rotation_item(), ROT_ITEM_LOGO);
+    REQUIRE_EQ(interval_test_logo_restart_count(), 1);
+    for (int64_t elapsed_us = 3000000; elapsed_us < 1000000000;
+         elapsed_us += 3000000) {
+        interval_test_set_time_us(1000000 + elapsed_us);
+        REQUIRE_EQ(clock_modes_get_rotation_item(), ROT_ITEM_LOGO);
+    }
+    REQUIRE_EQ(interval_test_logo_restart_count(), 1);
+    interval_test_set_time_us(1000000 + 999999999LL);
+    REQUIRE_EQ(clock_modes_get_rotation_item(), ROT_ITEM_LOGO);
+    interval_test_advance_time_us(1);
+    REQUIRE_EQ(clock_modes_get_rotation_item(), ROT_ITEM_MODE_1);
+    REQUIRE_EQ(interval_test_logo_restart_count(), 1);
+    interval_test_advance_time_us(45000000);
+    REQUIRE_EQ(clock_modes_get_rotation_item(), ROT_ITEM_MODE_2);
+    interval_test_advance_time_us(45000000);
+    REQUIRE_EQ(clock_modes_get_rotation_item(), ROT_ITEM_MODE_3);
+    interval_test_advance_time_us(44999999);
+    REQUIRE_EQ(clock_modes_get_rotation_item(), ROT_ITEM_MODE_3);
+    interval_test_advance_time_us(1);
+    REQUIRE_EQ(clock_modes_get_rotation_item(), ROT_ITEM_LOGO);
+    REQUIRE_EQ(interval_test_logo_restart_count(), 2);
+}
+
+void test_logo_deadline_does_not_wait_for_frame_or_cycle_boundary(void)
+{
+    const uint16_t durations[] = {1, 2, 3, 5, 11, 12, 13, 1000, 9999};
+    for (const uint16_t seconds : durations) {
+        reset_with_missing_nvs();
+        const clock_mode_intervals_t custom = {seconds, 45};
+        REQUIRE_EQ(clock_modes_set_intervals(&custom), ESP_OK);
+        interval_test_reset_counters();
+        interval_test_set_time_us(1000000);
+        REQUIRE_EQ(clock_modes_get_fixed_item(), FIXED_ITEM_LOGO);
+        REQUIRE_EQ(clock_modes_get_rotation_item(), ROT_ITEM_LOGO);
+
+        interval_test_advance_time_us((int64_t)seconds * 1000000LL - 1);
+        REQUIRE_EQ(clock_modes_get_fixed_item(), FIXED_ITEM_LOGO);
+        REQUIRE_EQ(clock_modes_get_rotation_item(), ROT_ITEM_LOGO);
+        interval_test_advance_time_us(1);
+        REQUIRE_EQ(clock_modes_get_fixed_item(), FIXED_ITEM_SCREEN);
+        REQUIRE_EQ(clock_modes_get_rotation_item(), ROT_ITEM_MODE_1);
+        REQUIRE_EQ(interval_test_logo_restart_count(), 2);
+    }
+}
+
+void test_duration_change_restarts_slot_and_playback_together(void)
+{
+    reset_with_missing_nvs();
+    const clock_mode_intervals_t initial = {1000, 45};
+    REQUIRE_EQ(clock_modes_set_intervals(&initial), ESP_OK);
+    interval_test_set_time_us(1000000);
+    REQUIRE_EQ(clock_modes_get_fixed_item(), FIXED_ITEM_LOGO);
+    REQUIRE_EQ(clock_modes_get_rotation_item(), ROT_ITEM_LOGO);
+    interval_test_advance_time_us(13000000);
+
+    interval_test_reset_counters();
+    const clock_mode_intervals_t updated = {5, 45};
+    REQUIRE_EQ(clock_modes_set_intervals(&updated), ESP_OK);
+    REQUIRE_EQ(interval_test_logo_restart_count(), 1);
+    REQUIRE_EQ(clock_modes_get_fixed_item(), FIXED_ITEM_LOGO);
+    REQUIRE_EQ(clock_modes_get_rotation_item(), ROT_ITEM_LOGO);
+    interval_test_advance_time_us(4999999);
+    REQUIRE_EQ(clock_modes_get_fixed_item(), FIXED_ITEM_LOGO);
+    REQUIRE_EQ(clock_modes_get_rotation_item(), ROT_ITEM_LOGO);
+    interval_test_advance_time_us(1);
+    REQUIRE_EQ(clock_modes_get_fixed_item(), FIXED_ITEM_SCREEN);
+    REQUIRE_EQ(clock_modes_get_rotation_item(), ROT_ITEM_MODE_1);
 }
 
 void test_set_updates_pair_resets_sequences_and_skips_unchanged_write(void)
@@ -212,6 +321,14 @@ int main(void)
              "fixed sequence shared intervals");
     run_test(test_rotation_sequence_uses_shared_intervals,
              "rotation sequence shared intervals");
+    run_test(test_fixed_logo_uses_full_configured_duration,
+             "fixed logo full 1000-second duration and playback restart");
+    run_test(test_rotation_logo_uses_full_configured_duration,
+             "rotation logo full 1000-second duration and playback restart");
+    run_test(test_logo_deadline_does_not_wait_for_frame_or_cycle_boundary,
+             "logo deadline independent of frame and cycle boundaries");
+    run_test(test_duration_change_restarts_slot_and_playback_together,
+             "duration change restarts slot and playback together");
     run_test(test_set_updates_pair_resets_sequences_and_skips_unchanged_write,
              "set reset and unchanged persistence");
     run_test(test_invalid_set_rejects_pair_atomically,

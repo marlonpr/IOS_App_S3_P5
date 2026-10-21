@@ -8,6 +8,7 @@
 #include "esp_timer.h"
 #include "led_panel.h"
 
+#include "clock_logo_manager.h"
 #include "clock_settings.h"
 
 static const char *TAG = "CLOCK_MODES";
@@ -85,6 +86,7 @@ static void replace_intervals_and_reset(
     portEXIT_CRITICAL(&s_state_mux);
 
     scroll_stop();
+    clock_logo_restart_sequence();
 }
 
 bool clock_modes_validate_intervals(const clock_mode_intervals_t *intervals)
@@ -189,25 +191,34 @@ esp_err_t clock_modes_restore_default_intervals(void)
 rotation_item_t clock_modes_get_rotation_item(void)
 {
     const int64_t now_us = esp_timer_get_time();
-    bool item_changed = false;
+    clock_mode_intervals_t intervals = {};
+    rotation_item_t observed_item = ROT_ITEM_LOGO;
+    int64_t observed_last_change_us = 0;
 
     portENTER_CRITICAL(&s_state_mux);
-    const clock_mode_intervals_t intervals = s_intervals;
-
     if (s_rotation_last_change_us == 0) {
         s_rotation_last_change_us = now_us;
         s_rotation_item = ROT_ITEM_LOGO;
         const rotation_item_t item = s_rotation_item;
         portEXIT_CRITICAL(&s_state_mux);
+        clock_logo_restart_sequence();
         return item;
     }
 
-    const uint16_t seconds = s_rotation_item == ROT_ITEM_LOGO
-                                 ? intervals.logo_seconds
-                                 : intervals.mode_seconds;
-    const int64_t interval_us = (int64_t)seconds * 1000000LL;
+    intervals = s_intervals;
+    observed_item = s_rotation_item;
+    observed_last_change_us = s_rotation_last_change_us;
+    portEXIT_CRITICAL(&s_state_mux);
 
-    if ((now_us - s_rotation_last_change_us) >= interval_us) {
+    const int64_t interval_us = observed_item == ROT_ITEM_LOGO
+        ? (int64_t)intervals.logo_seconds * 1000000LL
+        : (int64_t)intervals.mode_seconds * 1000000LL;
+    bool item_changed = false;
+
+    portENTER_CRITICAL(&s_state_mux);
+    if (s_rotation_item == observed_item &&
+        s_rotation_last_change_us == observed_last_change_us &&
+        (now_us - observed_last_change_us) >= interval_us) {
         s_rotation_last_change_us = now_us;
 
         switch (s_rotation_item)
@@ -237,6 +248,9 @@ rotation_item_t clock_modes_get_rotation_item(void)
 
     if (item_changed) {
         scroll_stop();
+        if (item == ROT_ITEM_LOGO) {
+            clock_logo_restart_sequence();
+        }
     }
 
     return item;
@@ -245,25 +259,34 @@ rotation_item_t clock_modes_get_rotation_item(void)
 fixed_item_t clock_modes_get_fixed_item(void)
 {
     const int64_t now_us = esp_timer_get_time();
-    bool item_changed = false;
+    clock_mode_intervals_t intervals = {};
+    fixed_item_t observed_item = FIXED_ITEM_LOGO;
+    int64_t observed_last_change_us = 0;
 
     portENTER_CRITICAL(&s_state_mux);
-    const clock_mode_intervals_t intervals = s_intervals;
-
     if (s_fixed_last_change_us == 0) {
         s_fixed_last_change_us = now_us;
         s_fixed_item = FIXED_ITEM_LOGO;
         const fixed_item_t item = s_fixed_item;
         portEXIT_CRITICAL(&s_state_mux);
+        clock_logo_restart_sequence();
         return item;
     }
 
-    const uint16_t seconds = s_fixed_item == FIXED_ITEM_LOGO
-                                 ? intervals.logo_seconds
-                                 : intervals.mode_seconds;
-    const int64_t interval_us = (int64_t)seconds * 1000000LL;
+    intervals = s_intervals;
+    observed_item = s_fixed_item;
+    observed_last_change_us = s_fixed_last_change_us;
+    portEXIT_CRITICAL(&s_state_mux);
 
-    if ((now_us - s_fixed_last_change_us) >= interval_us) {
+    const int64_t interval_us = observed_item == FIXED_ITEM_LOGO
+        ? (int64_t)intervals.logo_seconds * 1000000LL
+        : (int64_t)intervals.mode_seconds * 1000000LL;
+    bool item_changed = false;
+
+    portENTER_CRITICAL(&s_state_mux);
+    if (s_fixed_item == observed_item &&
+        s_fixed_last_change_us == observed_last_change_us &&
+        (now_us - observed_last_change_us) >= interval_us) {
         s_fixed_last_change_us = now_us;
 
         if (s_fixed_item == FIXED_ITEM_LOGO) {
@@ -280,6 +303,9 @@ fixed_item_t clock_modes_get_fixed_item(void)
 
     if (item_changed) {
         scroll_stop();
+        if (item == FIXED_ITEM_LOGO) {
+            clock_logo_restart_sequence();
+        }
     }
 
     return item;
@@ -295,4 +321,5 @@ void clock_modes_reset_sequences(void)
     portEXIT_CRITICAL(&s_state_mux);
 
     scroll_stop();
+    clock_logo_restart_sequence();
 }
